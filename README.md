@@ -13,7 +13,7 @@ available to the app **and** resolves in Android Studio on a Gradle sync, with n
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("dev.skip.spm")
+    id("com.theleftbit.skipspm")
 }
 
 skipSpm {

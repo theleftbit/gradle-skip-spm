@@ -3,7 +3,7 @@ plugins {
     id("com.gradle.plugin-publish") version "2.1.1"
 }
 
-group = "dev.skip"
+group = "com.theleftbit"
 version = "0.1.0"
 
 dependencies {
@@ -17,8 +17,8 @@ gradlePlugin {
     vcsUrl = "https://github.com/theleftbit/gradle-skip-spm.git"
     plugins {
         create("skipSpm") {
-            id = "dev.skip.spm"
-            implementationClass = "dev.skip.spm.SkipSpmPlugin"
+            id = "com.theleftbit.skipspm"
+            implementationClass = "com.theleftbit.skipspm.SkipSpmPlugin"
             displayName = "Skip SPM → Android (Gradle)"
             description = "Build a Skip (SwiftPM) package into Android AARs via `skip export` " +
                 "and consume them in the app build, with IDE symbol resolution on Gradle sync."

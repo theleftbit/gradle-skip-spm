@@ -1,4 +1,4 @@
-package dev.skip.spm
+package com.theleftbit.skipspm
 
 import org.gradle.api.Plugin
 import org.gradle.api.Project

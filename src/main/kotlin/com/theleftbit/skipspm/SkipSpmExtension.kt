@@ -1,4 +1,4 @@
-package dev.skip.spm
+package com.theleftbit.skipspm
 
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.ListProperty
