@@ -8,9 +8,16 @@ import org.gradle.api.provider.Property
 /**
  * Configuration for the `skipSpm` plugin.
  *
+ * Point it at the SwiftPM package to export, either locally or from a Git repo:
+ *
  * ```kotlin
  * skipSpm {
- *     packageDir      = file("../polymarket-shared")
+ *     // Local package (co-developed in the same repo):
+ *     packageDir = file("../polymarket-shared")
+ *     // …or a remote one (the plugin clones + pins it):
+ *     // packageGit = "https://github.com/org/shared.git"
+ *     // packageRef = "v1.2.3"
+ *
  *     module          = "USLive"
  *     abis            = listOf("aarch64", "armv7")
  *     namespacePrefix = "com.polymarket.shared"
@@ -19,8 +26,22 @@ import org.gradle.api.provider.Property
  * ```
  */
 abstract class SkipSpmExtension {
-    /** The SwiftPM package directory to export (e.g. `file("../polymarket-shared")`). */
+    /**
+     * Local SwiftPM package directory to export (e.g. `file("../polymarket-shared")`).
+     * Set exactly one of [packageDir] or [packageGit].
+     */
     abstract val packageDir: DirectoryProperty
+
+    /**
+     * Git URL of the SwiftPM package to export, instead of a local [packageDir]. The plugin clones
+     * it under `<rootProject>/.skip-spm/<repo>` and checks out [packageRef]. Pin [packageRef] to a
+     * tag or commit for reproducible, network-free incremental builds. Add `.skip-spm/` to
+     * `.gitignore`. Assumes the package's `Package.swift` is at the repo root.
+     */
+    abstract val packageGit: Property<String>
+
+    /** Git ref (tag, branch, or commit) to check out. Required when [packageGit] is set. */
+    abstract val packageRef: Property<String>
 
     /** The umbrella Skip module to export (e.g. `USLive`). */
     abstract val module: Property<String>
@@ -39,8 +60,9 @@ abstract class SkipSpmExtension {
     abstract val outputDir: DirectoryProperty
 
     /**
-     * Maps an Android build variant (by name) to a shared build mode (`debug` or `release`).
-     * Defaults to `debug→debug`, `release→release`; add custom build types (e.g. `internal→debug`).
+     * Extra or overriding variant→mode mappings. `debug→debug` and `release→release` are always
+     * mapped; use this to map custom build types (e.g. `put("internal", "debug")`) or to override a
+     * default. Each mode must be `debug` or `release`.
      */
     abstract val variantBuildMode: MapProperty<String, String>
 }

@@ -17,7 +17,12 @@ plugins {
 }
 
 skipSpm {
-    packageDir      = file("../polymarket-shared")  // the SwiftPM package
+    // The SwiftPM package — either a local dir…
+    packageDir      = file("../polymarket-shared")
+    // …or a remote repo the plugin clones + pins (set one or the other, not both):
+    // packageGit   = "https://github.com/org/shared.git"
+    // packageRef   = "v1.2.3"                        // tag, branch, or commit
+
     module          = "USLive"                       // umbrella module to export
     abis            = listOf("aarch64", "armv7")
     namespacePrefix = "com.polymarket.shared"        // see "Namespace" below
@@ -28,6 +33,18 @@ The plugin:
 - registers `exportSharedAars{Debug,Release}` — incremental Exec tasks keyed on the Swift sources,
 - consumes the resulting AARs via `fileTree(outputDir).builtBy(exportTask)`,
 - registers a `gradle-idea-ext` `afterSync` trigger so the IDE resolves the shared symbols on sync.
+
+## Package source
+
+Point the plugin at the SwiftPM package either locally (`packageDir`, for a package co-developed in
+the same repo) or remotely (`packageGit` + `packageRef`). For the remote case the plugin does a full
+clone under `<rootProject>/.skip-spm/<repo>` and checks out the ref — so:
+
+- add **`.skip-spm/`** to your `.gitignore`;
+- **pin `packageRef` to a tag or commit**: the clone happens once, and the export then stays
+  incremental and network-free. A moved *branch* ref won't auto-update (rerun with `--rerun-tasks`
+  or bump the ref);
+- the package's `Package.swift` is assumed to be at the repo root.
 
 ## Namespace
 

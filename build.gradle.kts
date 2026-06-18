@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "dev.skip"
-version = "0.1.0-SNAPSHOT"
+version = "0.1.0"
 
 dependencies {
     // Applied on the consuming root project to register the afterSync trigger that keeps the

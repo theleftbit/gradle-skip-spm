@@ -2,18 +2,22 @@ package dev.skip.spm
 
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.file.Directory
 import org.gradle.api.file.FileCollection
 import org.gradle.api.plugins.ExtensionAware
+import org.gradle.api.provider.Provider
 import org.gradle.api.tasks.TaskProvider
 import org.gradle.kotlin.dsl.register
 import org.gradle.plugins.ide.idea.IdeaPlugin
 import org.gradle.plugins.ide.idea.model.IdeaModel
+import org.jetbrains.gradle.ext.IdeaExtPlugin
 import org.jetbrains.gradle.ext.ProjectSettings
 import org.jetbrains.gradle.ext.TaskTriggersConfig
 
 /**
  * Builds a Skip (SwiftPM) package into Android AARs via `skip export` and wires them into the
  * consuming Android app build:
+ *  - the package comes from a local `packageDir` or is cloned from `packageGit`/`packageRef`,
  *  - `exportSharedAars{Debug,Release}` produce the AARs (incremental, keyed on the Swift sources),
  *  - each mapped `<variant>Implementation` config consumes them via `fileTree(...).builtBy(task)`,
  *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols.
@@ -24,7 +28,25 @@ class SkipSpmPlugin : Plugin<Project> {
         val ext = project.extensions.create("skipSpm", SkipSpmExtension::class.java)
         ext.namespacePrefix.convention("shared")
         ext.outputDir.convention(project.layout.projectDirectory.dir("lib"))
-        ext.variantBuildMode.convention(mapOf("debug" to "debug", "release" to "release"))
+        // Holds only the user's extra/override mappings; debug→debug and release→release are seeded
+        // as a base when wiring consumption (below). A MapProperty `put` does NOT merge with a
+        // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
+        ext.variantBuildMode.convention(emptyMap())
+
+        // The package to export comes from either a local dir or a Git clone (validated below). For
+        // the remote case the clone lives under <rootProject>/.skip-spm/<repo>; effectivePackageDir
+        // resolves to the clone when packageGit is set, otherwise to the local packageDir.
+        val cloneRoot = project.rootProject.layout.projectDirectory.dir(".skip-spm")
+        val clonePath: Provider<Directory> = ext.packageGit.map { cloneRoot.dir(repoNameFromUrl(it)) }
+        val effectivePackageDir: Provider<Directory> = clonePath.orElse(ext.packageDir)
+
+        val fetchTask = project.tasks.register<SkipFetchTask>("fetchSharedPackage") {
+            group = GROUP
+            description = "Clone the Skip shared package from Git and check out the configured ref."
+            gitUrl.set(ext.packageGit)
+            ref.set(ext.packageRef)
+            checkoutDir.set(clonePath)
+        }
 
         val exportTasks: Map<String, TaskProvider<SkipExportTask>> = MODES.associateWith { mode ->
             project.tasks.register<SkipExportTask>(
@@ -32,11 +54,11 @@ class SkipSpmPlugin : Plugin<Project> {
             ) {
                 group = GROUP
                 description = "Export the Skip shared package into $mode Android AARs."
-                packageDir.set(ext.packageDir)
-                sources.set(ext.packageDir.dir("Sources"))
+                packageDir.set(effectivePackageDir)
+                sources.set(effectivePackageDir.map { it.dir("Sources") })
                 manifests.from(
-                    ext.packageDir.file("Package.swift"),
-                    ext.packageDir.file("Package.resolved"),
+                    effectivePackageDir.map { it.file("Package.swift") },
+                    effectivePackageDir.map { it.file("Package.resolved") },
                 )
                 module.set(ext.module)
                 buildMode.set(mode)
@@ -54,9 +76,25 @@ class SkipSpmPlugin : Plugin<Project> {
             }
         }
 
-        // Consume the AARs: add the per-mode fileTree to each mapped <variant>Implementation config.
         project.afterEvaluate {
-            ext.variantBuildMode.get().forEach { (variant, mode) ->
+            // Source: exactly one of packageDir (local) or packageGit (remote).
+            val remote = ext.packageGit.isPresent
+            require(remote != ext.packageDir.isPresent) {
+                "skipSpm: set exactly one of packageDir (local) or packageGit (remote)."
+            }
+            if (remote) {
+                require(ext.packageRef.isPresent) {
+                    "skipSpm: packageRef (tag/branch/commit) is required when packageGit is set."
+                }
+                exportTasks.values.forEach { task -> task.configure { dependsOn(fetchTask) } }
+            }
+
+            // Consume the AARs: add the per-mode fileTree to each mapped <variant>Implementation config.
+            // debug→debug and release→release are always mapped; variantBuildMode adds or overrides
+            // extra variants (e.g. internal→debug). Seed the base map here so additive `put(...)` works.
+            val mapping = linkedMapOf("debug" to "debug", "release" to "release")
+            mapping.putAll(ext.variantBuildMode.get())
+            mapping.forEach { (variant, mode) ->
                 require(mode in MODES) {
                     "skipSpm: variantBuildMode['$variant'] must be one of $MODES, was '$mode'"
                 }
@@ -79,8 +117,12 @@ class SkipSpmPlugin : Plugin<Project> {
     /** Apply gradle-idea-ext on the root project and run [task] after each Gradle sync. */
     private fun registerIdeaSyncTrigger(project: Project, task: TaskProvider<*>) {
         val root = project.rootProject
+        // Apply both by class, not by string id: the plugin is on this plugin's classloader (a
+        // transitive `implementation` dep), but we apply it to the *root* project, whose own plugin
+        // registry doesn't know the `org.jetbrains.gradle.plugin.idea-ext` id. Class-based apply
+        // resolves against the class we already hold, so it works regardless of the target's classpath.
         root.pluginManager.apply(IdeaPlugin::class.java)
-        root.pluginManager.apply("org.jetbrains.gradle.plugin.idea-ext")
+        root.pluginManager.apply(IdeaExtPlugin::class.java)
         val ideaProject = root.extensions.getByType(IdeaModel::class.java).project
         val settings = (ideaProject as ExtensionAware).extensions.getByType(ProjectSettings::class.java)
         val triggers = (settings as ExtensionAware).extensions.getByType(TaskTriggersConfig::class.java)
@@ -90,5 +132,9 @@ class SkipSpmPlugin : Plugin<Project> {
     private companion object {
         const val GROUP = "skip"
         val MODES = listOf("debug", "release")
+
+        /** `https://github.com/org/shared.git` → `shared`. */
+        fun repoNameFromUrl(url: String): String =
+            url.trimEnd('/').substringAfterLast('/').removeSuffix(".git").ifEmpty { "package" }
     }
 }

@@ -82,6 +82,18 @@ abstract class SkipExportTask : DefaultTask() {
         execOps.exec {
             workingDir(pkg.parentFile)
             commandLine(command)
+            // skip's native build is gated on SKIP_ENABLED; mirror what the deploy script exported.
+            environment("SKIP_ENABLED", "1")
+            // skip is a macOS/Homebrew CLI that also shells out to the Homebrew `gradle`. Make sure
+            // both are found even when the Gradle daemon was started with a reduced PATH (e.g. by
+            // Android Studio via launchd): prepend the Homebrew bins to the daemon's inherited PATH.
+            val inheritedPath = System.getenv("PATH").orEmpty()
+            environment(
+                "PATH",
+                listOf("/opt/homebrew/bin", "/usr/local/bin", inheritedPath)
+                    .filter { it.isNotEmpty() }
+                    .joinToString(":"),
+            )
         }
 
         val prefix = namespacePrefix.get()
