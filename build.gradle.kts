@@ -5,6 +5,12 @@ plugins {
 group = "dev.skip"
 version = "0.1.0-SNAPSHOT"
 
+dependencies {
+    // Applied on the consuming root project to register the afterSync trigger that keeps the
+    // shared symbols resolved in Android Studio.
+    implementation("gradle.plugin.org.jetbrains.gradle.plugin.idea-ext:gradle-idea-ext:1.4.1")
+}
+
 gradlePlugin {
     plugins {
         create("skipSpm") {
