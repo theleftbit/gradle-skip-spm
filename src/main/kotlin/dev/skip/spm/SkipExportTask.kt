@@ -14,6 +14,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
 import java.io.File
 import java.net.URI
 import java.nio.file.FileSystems
@@ -25,6 +26,7 @@ import javax.inject.Inject
  * manifest namespace. Up-to-date when the Swift sources, the SPM manifest, and the ABIs are
  * unchanged — so it only re-runs when `polymarket-shared` actually changes.
  */
+@DisableCachingByDefault(because = "Drives an external skip/Swift build; its native outputs aren't relocatable cache entries.")
 abstract class SkipExportTask : DefaultTask() {
 
     /** Package location — NOT a tracked input (it contains the churning `.build/`). */

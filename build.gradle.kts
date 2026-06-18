@@ -1,5 +1,6 @@
 plugins {
     `kotlin-dsl`
+    id("com.gradle.plugin-publish") version "2.1.1"
 }
 
 group = "dev.skip"
@@ -12,6 +13,8 @@ dependencies {
 }
 
 gradlePlugin {
+    website = "https://github.com/theleftbit/gradle-skip-spm"
+    vcsUrl = "https://github.com/theleftbit/gradle-skip-spm.git"
     plugins {
         create("skipSpm") {
             id = "dev.skip.spm"
@@ -19,6 +22,7 @@ gradlePlugin {
             displayName = "Skip SPM → Android (Gradle)"
             description = "Build a Skip (SwiftPM) package into Android AARs via `skip export` " +
                 "and consume them in the app build, with IDE symbol resolution on Gradle sync."
+            tags = listOf("skip", "swift", "swiftpm", "android", "kmp", "aar")
         }
     }
 }

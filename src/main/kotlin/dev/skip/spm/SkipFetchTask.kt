@@ -7,6 +7,7 @@ import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
 import java.io.File
 import javax.inject.Inject
 
@@ -16,6 +17,7 @@ import javax.inject.Inject
  * and the checkout exists — so a pinned tag/commit is cloned once and never hits the network again.
  * (A moved branch ref won't auto-update; change the ref or rerun with `--rerun-tasks`.)
  */
+@DisableCachingByDefault(because = "Clones a Git repo into a fixed checkout; not a cacheable transform.")
 abstract class SkipFetchTask : DefaultTask() {
 
     @get:Input
