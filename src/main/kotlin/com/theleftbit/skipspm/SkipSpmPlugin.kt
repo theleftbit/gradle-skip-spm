@@ -63,7 +63,8 @@ class SkipSpmPlugin : Plugin<Project> {
                 )
                 module.set(ext.module)
                 buildMode.set(mode)
-                abis.set(ext.abis)
+                // Release can ship a wider ABI set than debug (releaseAbis); falls back to abis.
+                abis.set(if (mode == "release") ext.releaseAbis.orElse(ext.abis) else ext.abis)
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
             }

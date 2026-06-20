@@ -46,8 +46,14 @@ abstract class SkipSpmExtension {
     /** The umbrella Skip module to export (e.g. `USLive`). */
     abstract val module: Property<String>
 
-    /** Android ABIs to compile, in skip's naming (e.g. `aarch64`, `armv7`). */
+    /** Android ABIs to compile, in skip's naming (e.g. `aarch64`, `armv7`). Used for every mode unless [releaseAbis] overrides release. */
     abstract val abis: ListProperty<String>
+
+    /**
+     * ABIs for the release-mode export only; falls back to [abis] when unset. Lets debug stay
+     * arm64-only (fast local/CI builds) while release ships the full set (e.g. aarch64+armv7+x86_64).
+     */
+    abstract val releaseAbis: ListProperty<String>
 
     /**
      * Namespace prefix applied to each exported AAR's manifest as `<namespacePrefix>.<module>`,
