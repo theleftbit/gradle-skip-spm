@@ -19,7 +19,7 @@ import org.jetbrains.gradle.ext.TaskTriggersConfig
  * consuming Android app build:
  *  - the package comes from a local `packageDir` or is cloned from `packageGit`/`packageRef`,
  *  - `exportSharedAars{Debug,Release}` produce the AARs (incremental, keyed on the Swift sources),
- *  - each mapped `<variant>Implementation` config consumes them via `fileTree(...).builtBy(task)`,
+ *  - each mapped variant's `api`/`implementation` config consumes them via `fileTree(...).builtBy(task)`,
  *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols.
  */
 class SkipSpmPlugin : Plugin<Project> {
@@ -32,6 +32,7 @@ class SkipSpmPlugin : Plugin<Project> {
         // as a base when wiring consumption (below). A MapProperty `put` does NOT merge with a
         // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
         ext.variantBuildMode.convention(emptyMap())
+        ext.exposeAsApi.convention(false)
 
         // The package to export comes from either a local dir or a Git clone (validated below). For
         // the remote case the clone lives under <rootProject>/.skip-spm/<repo>; effectivePackageDir
@@ -94,11 +95,14 @@ class SkipSpmPlugin : Plugin<Project> {
             // extra variants (e.g. internal→debug). Seed the base map here so additive `put(...)` works.
             val mapping = linkedMapOf("debug" to "debug", "release" to "release")
             mapping.putAll(ext.variantBuildMode.get())
+            // `api` exposes the shared types transitively (a library that re-exports them);
+            // `implementation` keeps them internal (an app, or a module that wraps them).
+            val configKind = if (ext.exposeAsApi.get()) "Api" else "Implementation"
             mapping.forEach { (variant, mode) ->
                 require(mode in MODES) {
                     "skipSpm: variantBuildMode['$variant'] must be one of $MODES, was '$mode'"
                 }
-                val configuration = variant + "Implementation"
+                val configuration = variant + configKind
                 if (project.configurations.findByName(configuration) != null) {
                     project.dependencies.add(configuration, aarsFor(mode))
                 }

@@ -65,4 +65,12 @@ abstract class SkipSpmExtension {
      * default. Each mode must be `debug` or `release`.
      */
     abstract val variantBuildMode: MapProperty<String, String>
+
+    /**
+     * When true, the AARs are added to each variant's `api` configuration instead of
+     * `implementation`, so a library module that re-exports the shared types exposes them
+     * transitively to its own consumers. Defaults to false — right for an application module, or one
+     * that fully wraps the shared types behind its own API.
+     */
+    abstract val exposeAsApi: Property<Boolean>
 }
