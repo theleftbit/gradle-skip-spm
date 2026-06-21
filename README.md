@@ -4,9 +4,6 @@ A Gradle plugin that builds a [Skip](https://skip.dev) (SwiftPM) package into An
 `skip export` and consumes them in your Android app's Gradle build — so the shared Swift layer is
 available to the app **and** resolves in Android Studio on a Gradle sync, with no manual export step.
 
-> **Status:** early scaffold. Extracted from the Polymarket `mobile-app` "Gradle drives `skip export`"
-> setup and being generalized for reuse — and a possible upstream contribution to Skip.
-
 ## Usage (target)
 
 ```kotlin
@@ -18,14 +15,14 @@ plugins {
 
 skipSpm {
     // The SwiftPM package — either a local dir…
-    packageDir      = file("../polymarket-shared")
+    packageDir      = file("../foo-shared")
     // …or a remote repo the plugin clones + pins (set one or the other, not both):
     // packageGit   = "https://github.com/org/shared.git"
     // packageRef   = "v1.2.3"                        // tag, branch, or commit
 
-    module          = "USLive"                       // umbrella module to export
+    module          = "Foo"                           // umbrella module to export
     abis            = listOf("aarch64", "armv7")
-    namespacePrefix = "com.polymarket.shared"        // see "Namespace" below
+    namespacePrefix = "com.foo.bar"                   // see "Namespace" below
 }
 ```
 
