@@ -73,7 +73,7 @@ abstract class SkipExportTask : DefaultTask() {
         out.listFiles { f -> f.extension == "aar" }?.forEach { it.delete() }
 
         val command = mutableListOf(
-            "skip", "export",
+            resolveSkipExecutable(), "export",
             "--module", module.get(),
             "--project", pkg.name,
             "--no-export-project",
@@ -85,13 +85,45 @@ abstract class SkipExportTask : DefaultTask() {
             command.add(abi)
         }
 
-        runExportWithRetry(pkg, command)
+        // skip export resolves the *Android* dependency graph (SKIP_ENABLED=1), which adds the
+        // Skip/Android bridge pins on top of the iOS resolution committed to Package.resolved —
+        // leaving the working tree dirty after every build. Snapshot the lockfile and restore it
+        // afterward so the tree stays clean (this is what the old deploy script's
+        // `trap cleanup_package_resolved` did). A byte snapshot, not `git restore`, so it also works
+        // for a remote-cloned package and doesn't assume git is present.
+        val resolvedLock = File(pkg, "Package.resolved")
+        val lockBackup = if (resolvedLock.isFile) resolvedLock.readBytes() else null
+        try {
+            runExportWithRetry(pkg, command)
+        } finally {
+            if (lockBackup != null && resolvedLock.isFile &&
+                !resolvedLock.readBytes().contentEquals(lockBackup)
+            ) {
+                resolvedLock.writeBytes(lockBackup)
+            }
+        }
 
         val prefix = namespacePrefix.get()
         val mode = buildMode.get()
         out.listFiles { f -> f.extension == "aar" }?.forEach { aar ->
             normalizeManifest(aar, manifestPackageFor(aar, mode, prefix))
         }
+    }
+
+    /**
+     * Absolute path to the `skip` CLI. Gradle resolves a bare command name against the *daemon's*
+     * own PATH, which is reduced when Android Studio is launched from the Dock (launchd) — so a bare
+     * "skip" isn't found, even though we widen PATH for skip's children below (that widening only
+     * applies once skip has launched, so skip can find `gradle`). Honor an explicit `skip.path`
+     * system property / `SKIP_PATH` env override, else probe the usual install locations, else fall
+     * back to "skip" (terminal/CI, where the full shell PATH is present).
+     */
+    private fun resolveSkipExecutable(): String {
+        System.getProperty("skip.path")?.takeIf { it.isNotBlank() }?.let { return it }
+        System.getenv("SKIP_PATH")?.takeIf { it.isNotBlank() }?.let { return it }
+        val home = System.getProperty("user.home").orEmpty()
+        return listOf("/opt/homebrew/bin/skip", "/usr/local/bin/skip", "$home/.swiftly/bin/skip")
+            .firstOrNull { File(it).canExecute() } ?: "skip"
     }
 
     /**
@@ -112,9 +144,9 @@ abstract class SkipExportTask : DefaultTask() {
                 commandLine(command)
                 // skip's native build is gated on SKIP_ENABLED; mirror what the deploy script exported.
                 environment("SKIP_ENABLED", "1")
-                // skip is a macOS/Homebrew CLI that also shells out to the Homebrew `gradle`. Make sure
-                // both are found even when the Gradle daemon was started with a reduced PATH (e.g. by
-                // Android Studio via launchd): prepend the Homebrew bins to the daemon's inherited PATH.
+                // skip (resolved to an absolute path above) shells out to the Homebrew `gradle`, so
+                // widen the PATH skip passes to its children: the Gradle daemon's own PATH is reduced
+                // when Android Studio launches it via launchd, which would otherwise hide `gradle`.
                 val inheritedPath = System.getenv("PATH").orEmpty()
                 environment(
                     "PATH",
