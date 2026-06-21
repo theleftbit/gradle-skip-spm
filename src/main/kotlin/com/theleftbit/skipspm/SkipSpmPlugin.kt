@@ -6,6 +6,7 @@ import org.gradle.api.file.Directory
 import org.gradle.api.file.FileCollection
 import org.gradle.api.plugins.ExtensionAware
 import org.gradle.api.provider.Provider
+import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.TaskProvider
 import org.gradle.kotlin.dsl.register
 import org.gradle.plugins.ide.idea.IdeaPlugin
@@ -68,6 +69,19 @@ class SkipSpmPlugin : Plugin<Project> {
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
             }
+        }
+
+        // `skip export` creates a SwiftPM `.build/` inside the package dir. It lives outside Gradle's
+        // buildDir, so `gradle clean` / Android Studio "Clean Project" wouldn't otherwise remove it —
+        // wire it in. The exported AARs (outputDir) are deliberately NOT cleaned, so the export stays
+        // up-to-date across cleans; only the heavy `.build/` scratch is purged.
+        val cleanSharedBuild = project.tasks.register<Delete>("cleanSharedBuild") {
+            group = GROUP
+            description = "Delete the Skip shared package's SwiftPM .build/ scratch directory."
+            delete(effectivePackageDir.map { it.dir(".build").asFile })
+        }
+        project.tasks.matching { it.name == "clean" }.configureEach {
+            dependsOn(cleanSharedBuild)
         }
 
         fun aarsFor(mode: String): FileCollection {
