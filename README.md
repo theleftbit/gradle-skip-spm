@@ -62,27 +62,51 @@ is configured on the module that assembles the APK/AAB — your **application** 
 plugin itself is applied to a `com.android.library` module (e.g. `:shared`): AGP strips when it
 packages the final artifact, not in the library.
 
-**To strip, two things must both be true** (in the application module):
+**To strip, two things must be true** in the application module: an NDK must be **findable**, and
+`keepDebugSymbols` must be **absent** (it suppresses stripping). AGP's strip step shells out to the
+NDK's `llvm-strip` — any NDK works.
 
-1. **An NDK is installed and findable.** Install one via **Android Studio → SDK Manager → SDK Tools →
-   NDK** (or `sdkmanager`). AGP's strip step shells out to the NDK's `llvm-strip` — no NDK, no strip.
-   Pinning the version is *recommended* so every machine uses the same one and it's explicit; without
-   a pin AGP falls back to its **default** NDK version, which must also be installed:
+Rather than pinning a specific `ndkVersion` (which drifts and may not be installed on a given
+machine), **detect whatever NDK is installed and use it**, and **guard the release** so a *missing*
+NDK fails loudly instead of silently shipping unstripped libs:
 
-   ```kotlin
-   // app/build.gradle.kts  (the application module)
-   android {
-       ndkVersion = "28.2.13676358" // recommended; this exact NDK must be installed (else AGP fetches it)
-   }
-   ```
+```kotlin
+// app/build.gradle.kts  (the application module)
+import java.util.Properties
 
-2. **No `keepDebugSymbols`.** Don't set `packaging.jniLibs.keepDebugSymbols.add("**/*.so")` — it
-   suppresses stripping and ships the in-binary debug info to every user. Its *absence* is what lets
-   the strip run.
+// Installed NDKs, from the SDK dir (local.properties `sdk.dir`, else ANDROID_HOME / ANDROID_SDK_ROOT).
+val ndkRoot: File? = run {
+    val props = Properties()
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { props.load(it) }
+    (props.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT"))
+        ?.let { File(it, "ndk") }
+}
+val installedNdks = ndkRoot?.listFiles().orEmpty().filter { it.isDirectory }.map { it.name }.sorted()
 
-> ⚠️ **Silent failure:** with no findable NDK, AGP logs `Unable to strip … packaging them as they
-> are` and **ships the libs unstripped while the build stays GREEN**. So make sure an NDK is installed
-> on **every** build machine — your laptop *and* your CI/release runners. Verify on the artifact:
+android {
+    installedNdks.lastOrNull()?.let { ndkVersion = it } // highest installed; no hardcoded version
+    // Do NOT set packaging.jniLibs.keepDebugSymbols.add("**/*.so") — its absence is what lets the strip run.
+}
+
+// Fail a release build loudly when no NDK is installed. A no-output task ALWAYS runs (never
+// up-to-date), so it fires even when stripReleaseDebugSymbols is cached — a `doFirst` on the strip
+// task would be silently skipped when that task is up-to-date. Debug builds don't depend on it.
+val verifyNdkForStripping by tasks.registering {
+    doLast {
+        require(installedNdks.isNotEmpty()) {
+            "No Android NDK found (looked under ${ndkRoot ?: "an unset SDK dir"}) — install one via " +
+                "Android Studio → SDK Manager → SDK Tools → NDK (any version) so release native libs " +
+                "are stripped instead of silently shipping unstripped."
+        }
+    }
+}
+tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
+    dependsOn(verifyNdkForStripping)
+}
+```
+
+> ⚠️ **Why the guard:** with no findable NDK, AGP only logs `Unable to strip … packaging them as
+> they are` and **ships the libs unstripped while the build stays GREEN**. Verify on the artifact:
 > `unzip -l app-release.aab` → each `base/lib/<abi>/*.so` should be a few MB (stripped), not tens of MB.
 
 Optionally, keep a symbol table for crash symbolication — this is **separate from stripping** (it
