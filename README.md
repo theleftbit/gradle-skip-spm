@@ -72,14 +72,16 @@ NDK fails loudly instead of silently shipping unstripped libs:
 
 ```kotlin
 // app/build.gradle.kts  (the application module)
+import java.io.File
 import java.util.Properties
 
 // Installed NDKs, from the SDK dir (local.properties `sdk.dir`, else ANDROID_HOME / ANDROID_SDK_ROOT).
 val ndkRoot: File? = run {
     val props = Properties()
-    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { props.load(it) }
-    (props.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT"))
-        ?.let { File(it, "ndk") }
+    val lp = rootProject.file("local.properties")
+    if (lp.exists()) lp.inputStream().use { props.load(it) }
+    val sdk = props.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+    sdk?.let { File(it, "ndk") }
 }
 val installedNdks = ndkRoot?.listFiles().orEmpty().filter { it.isDirectory }.map { it.name }.sorted()
 
@@ -88,20 +90,20 @@ android {
     // Do NOT set packaging.jniLibs.keepDebugSymbols.add("**/*.so") — its absence is what lets the strip run.
 }
 
-// Fail a release build loudly when no NDK is installed. A no-output task ALWAYS runs (never
-// up-to-date), so it fires even when stripReleaseDebugSymbols is cached — a `doFirst` on the strip
-// task would be silently skipped when that task is up-to-date. Debug builds don't depend on it.
-val verifyNdkForStripping by tasks.registering {
-    doLast {
-        require(installedNdks.isNotEmpty()) {
-            "No Android NDK found (looked under ${ndkRoot ?: "an unset SDK dir"}) — install one via " +
-                "Android Studio → SDK Manager → SDK Tools → NDK (any version) so release native libs " +
-                "are stripped instead of silently shipping unstripped."
-        }
-    }
+// Fail loudly when a release/internal build is requested but no NDK is installed. This is a
+// CONFIGURATION-TIME check, not a task: a task action capturing `installedNdks`/`ndkRoot` can't be
+// serialized by Gradle's configuration cache ("cannot serialize Gradle script object references").
+// The installedNdks file read is itself a config-cache input, so adding/removing an NDK re-evaluates it.
+val buildingStrippedVariant = gradle.startParameter.taskNames.any {
+    val n = it.substringAfterLast(":").lowercase()
+    (n.startsWith("bundle") || n.startsWith("assemble")) && ("release" in n || "internal" in n)
 }
-tasks.matching { it.name == "bundleRelease" || it.name == "assembleRelease" }.configureEach {
-    dependsOn(verifyNdkForStripping)
+if (buildingStrippedVariant && installedNdks.isEmpty()) {
+    error(
+        "No Android NDK found (looked under ${ndkRoot ?: "an unset Android SDK dir"}) — install one via " +
+            "Android Studio → SDK Manager → SDK Tools → NDK (any version) so release native libs are " +
+            "stripped instead of silently shipping unstripped.",
+    )
 }
 ```
 
