@@ -93,7 +93,11 @@ android {
 // The installedNdks file read is itself a config-cache input, so adding/removing an NDK re-evaluates it.
 val buildingStrippedVariant = gradle.startParameter.taskNames.any {
     val n = it.substringAfterLast(":").lowercase()
-    (n.startsWith("bundle") || n.startsWith("assemble")) && ("release" in n || "internal" in n)
+    // Aggregate lifecycle tasks (`assemble`, `bundle`, `build`) build ALL variants — incl.
+    // release/internal — but their names don't contain the variant; the explicit variant tasks do.
+    // Catch both, or `./gradlew assemble`/`build` would skip the guard and ship unstripped libs.
+    n == "assemble" || n == "bundle" || n == "build" ||
+        ((n.startsWith("bundle") || n.startsWith("assemble")) && ("release" in n || "internal" in n))
 }
 if (buildingStrippedVariant && installedNdks.isEmpty()) {
     error(
