@@ -1,16 +1,21 @@
 # gradle-skip-spm
 
+[![Gradle Plugin Portal](https://img.shields.io/gradle-plugin-portal/v/com.theleftbit.skipspm?logo=gradle)](https://plugins.gradle.org/plugin/com.theleftbit.skipspm)
+
 A Gradle plugin that builds a [Skip](https://skip.dev) (SwiftPM) package into Android AARs via
 `skip export` and consumes them in your Android app's Gradle build — so the shared Swift layer is
 available to the app **and** resolves in Android Studio on a Gradle sync, with no manual export step.
 
-## Usage (target)
+## Usage
+
+The plugin is published on the [Gradle Plugin Portal](https://plugins.gradle.org/plugin/com.theleftbit.skipspm),
+so the default `gradlePluginPortal()` in your `settings.gradle.kts` resolves it — no extra repository needed:
 
 ```kotlin
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("com.theleftbit.skipspm")
+    id("com.theleftbit.skipspm") version "0.1.6"
 }
 
 skipSpm {
