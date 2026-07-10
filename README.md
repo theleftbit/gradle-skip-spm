@@ -15,7 +15,7 @@ so the default `gradlePluginPortal()` in your `settings.gradle.kts` resolves it 
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("com.theleftbit.skipspm") version "0.1.6"
+    id("com.theleftbit.skipspm") version "0.2.0"
 }
 
 skipSpm {
@@ -33,8 +33,41 @@ skipSpm {
 
 The plugin:
 - registers `exportSharedAars{Debug,Release}` — incremental Exec tasks keyed on the Swift sources,
-- consumes the resulting AARs via `fileTree(outputDir).builtBy(exportTask)`,
-- registers a `gradle-idea-ext` `afterSync` trigger so the IDE resolves the shared symbols on sync.
+- consumes the resulting AARs via `fileTree(outputDir).builtBy(exportTask)` — in the applied
+  project and in every project listed in `consumers` (see
+  ["Multi-module apps"](#multi-module-apps) below),
+- registers a `gradle-idea-ext` `afterSync` trigger so the IDE resolves the shared symbols on sync,
+- prunes the previous AARs' stale transform-cache entries after each export (see
+  ["Disk usage"](#disk-usage-gradles-transforms-cache) below).
+
+## Multi-module apps
+
+Applied to a single module, the plugin wires the AARs into that module's variants automatically.
+In a multi-module app, don't apply the plugin per module (that would register duplicate export
+tasks) and don't hand-roll `fileTree(...).builtBy(...)` in each consuming module — apply the plugin
+**once**, e.g. on the root project, and list the consumers:
+
+```kotlin
+// root build.gradle.kts
+plugins { id("com.theleftbit.skipspm") version "…" }
+
+skipSpm {
+    packageDir      = file("../foo-shared")
+    module          = "Foo"
+    abis            = listOf("aarch64")
+    namespacePrefix = "com.foo.bar"
+
+    exposeAsApi     = true    // libraries re-export the shared types to their own consumers
+    consumers       = listOf(":core", ":featureA", ":app")
+}
+```
+
+There is still a **single export per mode**; each listed project's mapped variant configs
+(`debugApi`, `releaseImplementation`, …, per `variantBuildMode` + `exposeAsApi`) consume the same
+`fileTree(outputDir/<mode>).builtBy(export)`, so even a cold single-module build
+(`:featureA:assembleDebug`) triggers the export first. Projects without a mapped config (non-Android,
+or missing that variant) are skipped silently; an unknown path fails the build. `consumers` defaults
+to just the project the plugin is applied to, so single-module setups need no change.
 
 ## Package source
 
@@ -129,6 +162,48 @@ android {
             // huge). "none" = smallest upload, no Play-side native symbolication. "full" = everything.
             ndk { debugSymbolLevel = "symbol_table" }
         }
+    }
+}
+```
+
+## Disk usage: Gradle's transforms cache
+
+AGP consumes an AAR by **exploding** it — classes.jar plus every native `.so` — into a
+content-addressed entry under `~/.gradle/caches/<gradle-version>/transforms/`. For a Skip export
+one exploded umbrella AAR can be ~0.5 GB, and **every shared-package change creates brand-new
+entries** while the previous ones sit until Gradle's own cleanup reaps entries unused for ~7 days.
+Under active development that leaks gigabytes per day.
+
+The plugin therefore prunes automatically (**`pruneStaleTransforms`, default `true`**): after each
+export it compares every AAR's bytes against the previous export, and deletes the transform entries
+of the AARs that actually **changed** (their old-content entries are stale by construction), logging
+what it freed:
+
+```
+skipSpm: pruned 24 stale transform-cache entries (5842 MB) for changed AARs: USLive-release.aar, …
+```
+
+Byte-identical re-exports (common — skip's underlying Android build is reproducible, so a re-export
+after e.g. a comment-only change reproduces the same bytes) leave the cache untouched: those entries
+are still **live**, and deleting an entry the running Gradle daemon references breaks the build with
+dangling classpath paths. For the same reason, never `rm -rf` the transforms cache while builds/IDE
+syncs are running — stop the daemons first (`./gradlew --stop`).
+
+Only entries whose transform *output name* is attributable to this package's AARs (e.g.
+`USLive-release/`, `USLive-release-runtime.jar`, `com.foo.shared.uslive-r.txt`) are touched;
+everything else in the cache is left alone, and a prune failure never fails the build. Set
+`pruneStaleTransforms = false` only if concurrent builds of **another checkout** share the same
+Gradle user home and might be reading same-named entries mid-build.
+
+To also cap the rest of the cache, shorten Gradle's retention — this is Gradle-user-home-wide
+configuration, so an init script is the only supported place (a project plugin can't set it):
+
+```kotlin
+// ~/.gradle/init.d/cache-retention.init.gradle.kts
+beforeSettings {
+    caches {
+        // Transforms fall under "created resources"; the default is 7 days.
+        createdResources.setRemoveUnusedEntriesAfterDays(2)
     }
 }
 ```

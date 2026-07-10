@@ -79,4 +79,33 @@ abstract class SkipSpmExtension {
      * that fully wraps the shared types behind its own API.
      */
     abstract val exposeAsApi: Property<Boolean>
+
+    /**
+     * Gradle paths of the projects that consume the AARs (e.g. `listOf(":core", ":app")`).
+     * Defaults to just the project the plugin is applied to.
+     *
+     * Lets a multi-module app apply the plugin **once** — typically on the root project, keeping a
+     * single shared export — and wire the AARs into every module that needs the shared types,
+     * instead of each module hand-rolling `fileTree(...).builtBy(exportTask)`. Each listed project
+     * gets the AARs added to every mapped variant's `api`/`implementation` config that exists there
+     * (per [variantBuildMode] and [exposeAsApi]); projects without a mapped config (non-Android, or
+     * missing that variant) are skipped silently.
+     */
+    abstract val consumers: ListProperty<String>
+
+    /**
+     * Prune Gradle's artifact-transform cache after each export. Defaults to true.
+     *
+     * AGP consumes an AAR by *exploding* it (classes.jar plus all the native `.so`) into a
+     * content-addressed entry under `~/.gradle/caches/<version>/transforms/`. Each entry is as
+     * large as the unpacked AARs (hundreds of MB), every content change strands the previous
+     * entries as garbage, and Gradle's own cleanup only reaps entries unused for ~7 days — so
+     * active shared-package development leaks gigabytes per day. When enabled, each export deletes
+     * the transform entries of the AARs whose bytes actually *changed* in that export (their old
+     * entries are stale by construction); byte-identical re-exports leave the cache untouched,
+     * because their entries are still live and deleting them breaks the running daemon. Disable
+     * only if concurrent builds of *another* checkout may be consuming the same AAR names from the
+     * same Gradle user home mid-build.
+     */
+    abstract val pruneStaleTransforms: Property<Boolean>
 }

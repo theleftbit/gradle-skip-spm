@@ -1,7 +1,9 @@
 package com.theleftbit.skipspm
 
+import org.gradle.api.GradleException
 import org.gradle.api.Plugin
 import org.gradle.api.Project
+import org.gradle.api.UnknownProjectException
 import org.gradle.api.file.Directory
 import org.gradle.api.file.FileCollection
 import org.gradle.api.plugins.ExtensionAware
@@ -20,8 +22,12 @@ import org.jetbrains.gradle.ext.TaskTriggersConfig
  * consuming Android app build:
  *  - the package comes from a local `packageDir` or is cloned from `packageGit`/`packageRef`,
  *  - `exportSharedAars{Debug,Release}` produce the AARs (incremental, keyed on the Swift sources),
- *  - each mapped variant's `api`/`implementation` config consumes them via `fileTree(...).builtBy(task)`,
- *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols.
+ *  - each mapped variant's `api`/`implementation` config consumes them via `fileTree(...).builtBy(task)`
+ *    — in this project and in every project listed in `consumers` (multi-module apps apply the
+ *    plugin once, e.g. on the root project, and list the modules that need the shared types),
+ *  - a gradle-idea-ext `afterSync` trigger regenerates them on Gradle sync so AS resolves symbols,
+ *  - each export prunes the previous AARs' now-stale artifact-transform cache entries
+ *    (`pruneStaleTransforms`), which would otherwise leak GBs/day under active development.
  */
 class SkipSpmPlugin : Plugin<Project> {
 
@@ -34,6 +40,8 @@ class SkipSpmPlugin : Plugin<Project> {
         // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
         ext.variantBuildMode.convention(emptyMap())
         ext.exposeAsApi.convention(false)
+        ext.pruneStaleTransforms.convention(true)
+        ext.consumers.convention(listOf(project.path))
 
         // The package to export comes from either a local dir or a Git clone (validated below). For
         // the remote case the clone lives under <rootProject>/.skip-spm/<repo>; effectivePackageDir
@@ -68,6 +76,8 @@ class SkipSpmPlugin : Plugin<Project> {
                 abis.set(if (mode == "release") ext.releaseAbis.orElse(ext.abis) else ext.abis)
                 namespacePrefix.set(ext.namespacePrefix)
                 outputDir.set(ext.outputDir.dir(mode))
+                pruneStaleTransforms.set(ext.pruneStaleTransforms)
+                gradleUserHomeDir.set(project.gradle.gradleUserHomeDir)
             }
         }
 
@@ -108,21 +118,41 @@ class SkipSpmPlugin : Plugin<Project> {
                 exportTasks.values.forEach { task -> task.configure { dependsOn(fetchTask) } }
             }
 
-            // Consume the AARs: add the per-mode fileTree to each mapped <variant>Implementation config.
-            // debug→debug and release→release are always mapped; variantBuildMode adds or overrides
-            // extra variants (e.g. internal→debug). Seed the base map here so additive `put(...)` works.
+            // Consume the AARs: add the per-mode fileTree to each mapped <variant>Implementation config
+            // of every project in `consumers` (default: just this project). debug→debug and
+            // release→release are always mapped; variantBuildMode adds or overrides extra variants
+            // (e.g. internal→debug). Seed the base map here so additive `put(...)` works.
             val mapping = linkedMapOf("debug" to "debug", "release" to "release")
             mapping.putAll(ext.variantBuildMode.get())
-            // `api` exposes the shared types transitively (a library that re-exports them);
-            // `implementation` keeps them internal (an app, or a module that wraps them).
-            val configKind = if (ext.exposeAsApi.get()) "Api" else "Implementation"
             mapping.forEach { (variant, mode) ->
                 require(mode in MODES) {
                     "skipSpm: variantBuildMode['$variant'] must be one of $MODES, was '$mode'"
                 }
-                val configuration = variant + configKind
-                if (project.configurations.findByName(configuration) != null) {
-                    project.dependencies.add(configuration, aarsFor(mode))
+            }
+            // `api` exposes the shared types transitively (a library that re-exports them);
+            // `implementation` keeps them internal (an app, or a module that wraps them).
+            val configKind = if (ext.exposeAsApi.get()) "Api" else "Implementation"
+            fun wireConsumption(target: Project) {
+                mapping.forEach { (variant, mode) ->
+                    val configuration = variant + configKind
+                    if (target.configurations.findByName(configuration) != null) {
+                        target.dependencies.add(configuration, aarsFor(mode))
+                    }
+                }
+            }
+            ext.consumers.get().distinct().forEach { path ->
+                val target = try {
+                    project.project(path)
+                } catch (e: UnknownProjectException) {
+                    throw GradleException("skipSpm: consumers entry '$path' is not a project in this build.", e)
+                }
+                // We're inside this project's own afterEvaluate, so wire it (and any sibling that
+                // evaluated before us) now; later-evaluating projects get wired once their Android
+                // configurations exist, in their own afterEvaluate.
+                if (target == project || target.state.executed) {
+                    wireConsumption(target)
+                } else {
+                    target.afterEvaluate { wireConsumption(this) }
                 }
             }
         }
