@@ -138,6 +138,16 @@ class SkipSpmPlugin : Plugin<Project> {
                     if (target.configurations.findByName(configuration) != null) {
                         target.dependencies.add(configuration, aarsFor(mode))
                     }
+                    // Also anchor the export to the variant lifecycle. fileTree.builtBy only
+                    // schedules the export when a task resolves the files with their task
+                    // dependencies intact — some AGP artifact-view resolutions and pruned-graph
+                    // topologies (e.g. a library whose bundle*Aar tasks are disabled because AGP
+                    // forbids local .aar file deps in a bundled AAR) can otherwise reach lib/
+                    // without ever scheduling the export after a clean. preBuild exists for every
+                    // AGP variant; with flavors it's pre<Flavor><BuildType>Build, hence endsWith.
+                    val preBuildSuffix = variant.replaceFirstChar { it.uppercase() } + "Build"
+                    target.tasks.matching { it.name.startsWith("pre") && it.name.endsWith(preBuildSuffix) }
+                        .configureEach { dependsOn(exportTasks.getValue(mode)) }
                 }
             }
             ext.consumers.get().distinct().forEach { path ->
