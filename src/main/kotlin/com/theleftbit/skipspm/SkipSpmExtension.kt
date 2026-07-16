@@ -101,11 +101,14 @@ abstract class SkipSpmExtension {
      * large as the unpacked AARs (hundreds of MB), every content change strands the previous
      * entries as garbage, and Gradle's own cleanup only reaps entries unused for ~7 days — so
      * active shared-package development leaks gigabytes per day. When enabled, each export deletes
-     * the transform entries of the AARs whose bytes actually *changed* in that export (their old
-     * entries are stale by construction); byte-identical re-exports leave the cache untouched,
-     * because their entries are still live and deleting them breaks the running daemon. Disable
-     * only if concurrent builds of *another* checkout may be consuming the same AAR names from the
-     * same Gradle user home mid-build.
+     * the transform entries of the AARs whose bytes provably *changed* in that export (a previous
+     * AAR existed and hashed differently), and only entries older than ~24h — a live daemon caches
+     * transform locations in memory for its whole lifetime without re-checking existence, so
+     * anything younger (or anything that might match regenerated content: byte-identical
+     * re-exports, post-clean exports with no baseline) is left alone. Old churn is what actually
+     * bloats the cache, and it self-prunes on later exports once aged. Disable only if concurrent
+     * builds of *another* checkout may be consuming the same AAR names from the same Gradle user
+     * home mid-build.
      */
     abstract val pruneStaleTransforms: Property<Boolean>
 }

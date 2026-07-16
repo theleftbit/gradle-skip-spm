@@ -15,7 +15,7 @@ so the default `gradlePluginPortal()` in your `settings.gradle.kts` resolves it 
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("com.theleftbit.skipspm") version "0.2.1"
+    id("com.theleftbit.skipspm") version "0.2.2"
 }
 
 skipSpm {
@@ -176,18 +176,25 @@ Under active development that leaks gigabytes per day.
 
 The plugin therefore prunes automatically (**`pruneStaleTransforms`, default `true`**): after each
 export it compares every AAR's bytes against the previous export, and deletes the transform entries
-of the AARs that actually **changed** (their old-content entries are stale by construction), logging
-what it freed:
+of the AARs that provably **changed**, logging what it freed:
 
 ```
 skipSpm: pruned 24 stale transform-cache entries (5842 MB) for changed AARs: USLive-release.aar, …
 ```
 
-Byte-identical re-exports (common — skip's underlying Android build is reproducible, so a re-export
-after e.g. a comment-only change reproduces the same bytes) leave the cache untouched: those entries
-are still **live**, and deleting an entry the running Gradle daemon references breaks the build with
-dangling classpath paths. For the same reason, never `rm -rf` the transforms cache while builds/IDE
-syncs are running — stop the daemons first (`./gradlew --stop`).
+Two safety rules keep this from ever yanking an entry a build still needs — a live Gradle daemon
+caches transform locations in memory for its whole lifetime *without re-checking they exist*, so a
+wrongly deleted entry resurfaces as unresolved shared classes or a missing-file failure:
+
+- **Only provably-stale content**: byte-identical re-exports (common — skip's underlying Android
+  build is reproducible) and exports with no previous AARs to compare against (right after a clean,
+  or a first build on a machine with a populated cache) never prune.
+- **Only entries older than ~24 h**: young entries may still be referenced by a live daemon (or
+  match content a branch switch flips back to). Old churn is what actually bloats the cache, and
+  fresh churn self-prunes on a later export once it ages past the window.
+
+For the same reason, never `rm -rf` the transforms cache while builds/IDE syncs are running — stop
+the daemons first (`./gradlew --stop`).
 
 Only entries whose transform *output name* is attributable to this package's AARs (e.g.
 `USLive-release/`, `USLive-release-runtime.jar`, `com.foo.shared.uslive-r.txt`) are touched;
