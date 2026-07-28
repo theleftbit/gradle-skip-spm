@@ -4,12 +4,18 @@ plugins {
 }
 
 group = "com.theleftbit"
-version = "0.2.2"
+version = "0.2.3"
 
 dependencies {
     // Applied on the consuming root project to register the afterSync trigger that keeps the
     // shared symbols resolved in Android Studio.
     implementation("gradle.plugin.org.jetbrains.gradle.plugin.idea-ext:gradle-idea-ext:1.4.1")
+    testImplementation(kotlin("test"))
+    testImplementation(gradleTestKit())
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
 
 gradlePlugin {

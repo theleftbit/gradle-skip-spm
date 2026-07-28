@@ -88,6 +88,26 @@ namespace across all exported modules, which collide when consumed together. The
 each AAR's manifest to `<namespacePrefix>.<module>`. If Skip emits unique per-module namespaces
 upstream, this step (and the option) can be removed — tracked separately.
 
+## Staleness self-healing
+
+`skip export` is incremental over the package's `.build/` scratch, and Gradle's input tracking
+can't see inside it. Anything that re-resolves the package **outside** the export task — running
+`skip android test` against the same package, or restoring `Package.resolved` (e.g. via `git
+restore`) after skip's resolution changed it — can leave the transpiler outputs
+(`.build/plugins/outputs`) referencing vendored files that no longer exist. The next incremental
+export then fails with errors like:
+
+- `the package manifest at '….build/plugins/outputs/…/skipstone/…/Packages/<pkg>/Package.swift'
+  cannot be accessed (doesn't exist)`
+- cascading `Unresolved reference 'SwiftPeerBridged'` (and other skip-bridge runtime symbols) in
+  the generated Kotlin
+- "husk" AARs that package successfully but contain no compiled classes
+
+The export task detects all three signatures, deletes `.build/plugins/outputs`, and retries the
+export once from scratch (expect that one build to take as long as a clean export). If even the
+clean re-export fails, the build fails with a pointer to `cleanSharedBuild` / `gradle clean`,
+which deletes the package's entire `.build/`.
+
 ## Native libraries & app size (stripping)
 
 `skip export` compiles the shared Swift to **native `.so`** — the umbrella module plus the Swift

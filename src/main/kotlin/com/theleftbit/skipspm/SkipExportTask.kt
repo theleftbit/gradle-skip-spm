@@ -22,12 +22,22 @@ import java.io.OutputStream
 import java.net.URI
 import java.nio.file.FileSystems
 import java.nio.file.Files
+import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import javax.inject.Inject
 
 /**
  * Runs `skip export` to build the SwiftPM package into Android AARs, then normalizes each AAR's
  * manifest namespace. Up-to-date when the Swift sources, the SPM manifest, and the ABIs are
  * unchanged — so it only re-runs when the shared package actually changes.
+ *
+ * `skip export` is itself incremental over the package's `.build/` scratch, and that state can go
+ * stale in ways Gradle's input tracking cannot see: anything that re-resolves the package outside
+ * this task (`skip android test`, an external `git restore` of Package.resolved) mutates the shared
+ * `.build/`, after which an incremental export can reference vendored transpiler files that no
+ * longer exist, or package "husk" AARs with no compiled classes. Both symptoms are detected here
+ * and self-healed: the transpiler outputs (`.build/plugins/outputs`) are deleted and the export
+ * retried once from scratch.
  */
 @DisableCachingByDefault(because = "Drives an external skip/Swift build; its native outputs aren't relocatable cache entries.")
 abstract class SkipExportTask : DefaultTask() {
@@ -76,11 +86,42 @@ abstract class SkipExportTask : DefaultTask() {
     fun export() {
         val pkg = packageDir.get().asFile
         val out = outputDir.get().asFile
-        out.mkdirs()
-        // Hash the previous AARs before anything touches them: the transform-cache prune below must
-        // only target AARs whose bytes actually changed in this export (see pruneStaleTransformEntries).
+        // Hash the previous AARs before anything touches them: the transform-cache prune must only
+        // target AARs whose bytes actually changed in this export (see pruneStaleTransformEntries).
+        // Computed once, outside the self-heal loop, so a healed retry still prunes against the
+        // AARs that existed before this task ran (the first attempt deletes them).
         val previousHashes = out.listFiles { f -> f.extension == "aar" }
             ?.associate { it.name to it.contentHash() }.orEmpty()
+        var selfCleaned = false
+        while (true) {
+            try {
+                exportOnce(pkg, out, previousHashes)
+                return
+            } catch (stale: StaleTranspilerOutputsException) {
+                val transpilerOutputs = File(pkg, TRANSPILER_OUTPUTS_PATH)
+                if (selfCleaned || !transpilerOutputs.isDirectory) {
+                    throw GradleException(
+                        "skip export failed on stale transpiler outputs and a clean re-export did not recover: " +
+                            "${stale.message}. Run the `cleanSharedBuild` task (or `gradle clean`) to delete the " +
+                            "package's entire .build/, then build again.",
+                        stale,
+                    )
+                }
+                selfCleaned = true
+                logger.warn(
+                    "skip export hit stale transpiler outputs (${stale.message}); " +
+                        "deleting ${transpilerOutputs.absolutePath} and re-exporting from scratch. " +
+                        "This happens when something re-resolved the package outside Gradle " +
+                        "(e.g. `skip android test`, or a `git restore` of Package.resolved).",
+                )
+                transpilerOutputs.deleteRecursively()
+            }
+        }
+    }
+
+    /** One full export attempt: run skip, normalize the AAR namespaces, reject husks, prune caches. */
+    private fun exportOnce(pkg: File, out: File, previousHashes: Map<String, String>) {
+        out.mkdirs()
         // Drop stale AARs so a removed module's leftover can't linger and get consumed.
         out.listFiles { f -> f.extension == "aar" }?.forEach { it.delete() }
 
@@ -120,6 +161,18 @@ abstract class SkipExportTask : DefaultTask() {
         val aars = out.listFiles { f -> f.extension == "aar" }?.toList().orEmpty()
         aars.forEach { aar ->
             normalizeManifest(aar, manifestPackageFor(aar, mode, prefix))
+        }
+
+        // skip export can complete successfully while packaging "husk" AARs — a module whose
+        // classes.jar is an empty zip. The breakage then surfaces far away (hundreds of unresolved
+        // references when the consuming app compiles), so validate here, BEFORE the transform-cache
+        // prune (a failed attempt must not prune): every Skip module compiles at least some Kotlin,
+        // so an AAR with zero .class entries is always a silently broken export.
+        val husks = aars.filterNot(::aarHasCompiledClasses)
+        if (husks.isNotEmpty()) {
+            throw StaleTranspilerOutputsException(
+                "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
+            )
         }
 
         if (pruneStaleTransforms.getOrElse(true)) {
@@ -240,6 +293,10 @@ abstract class SkipExportTask : DefaultTask() {
      * network hiccup ("Couldn't fetch updates from remote repositories") would otherwise fail the
      * build. Compile/config failures are surfaced immediately — only network-shaped failures retry,
      * so a real Swift error never burns three full export runs.
+     *
+     * A failure whose output matches a stale-transpiler-outputs signature is thrown as
+     * [StaleTranspilerOutputsException] instead (retrying it against the same `.build/` state can
+     * never succeed); [export] self-heals it by cleaning the outputs and re-exporting.
      */
     private fun runExportWithRetry(pkg: File, command: List<String>) {
         var attempt = 1
@@ -269,6 +326,11 @@ abstract class SkipExportTask : DefaultTask() {
             if (result.exitValue == 0) return
 
             val combined = outBuf.toString() + errBuf.toString()
+            if (looksLikeStaleTranspilerOutputs(combined)) {
+                throw StaleTranspilerOutputsException(
+                    "the transpiled module graph references files that no longer exist",
+                )
+            }
             val looksTransient = TRANSIENT_FETCH_HINTS.any { combined.contains(it, ignoreCase = true) }
             if (looksTransient && attempt < MAX_EXPORT_ATTEMPTS) {
                 val backoffSeconds = attempt * RETRY_BACKOFF_SECONDS
@@ -355,5 +417,60 @@ abstract class SkipExportTask : DefaultTask() {
             "ssl_error", "ssl error", "tls",
             "the requested url returned error",
         )
+    }
+}
+
+/** An export failure caused by stale incremental transpiler state, recoverable by a clean re-export. */
+internal class StaleTranspilerOutputsException(message: String) : GradleException(message)
+
+/** The skipstone transpiler's output tree, relative to the package dir. */
+internal const val TRANSPILER_OUTPUTS_PATH = ".build/plugins/outputs"
+
+/**
+ * Classifies a failed `skip export`'s output as "the incremental transpiler outputs are stale".
+ * Two known signatures:
+ *  - SwiftPM can't load a vendored package manifest inside the skipstone outputs, e.g.
+ *    `error: 'skip-keychain': the package manifest at '….build/plugins/outputs/…/skipstone/USLive/
+ *    src/main/swift/Packages/skip-keychain/Package.swift' cannot be accessed (… doesn't exist)`.
+ *    Requiring a transpiler-outputs path in the same output keeps a genuinely missing *user*
+ *    manifest from triggering a pointless (and slow) clean re-export.
+ *  - The generated Kotlin no longer resolves the skip-bridge *runtime* symbols (the bridge AARs
+ *    fell out of the classpath), e.g. `Unresolved reference 'SwiftPeerBridged'`. Only bridge
+ *    runtime symbols count — a plain unresolved reference is usually a real error in user code.
+ */
+internal fun looksLikeStaleTranspilerOutputs(output: String): Boolean {
+    val touchesTranspilerOutputs =
+        output.contains("/skipstone/") || output.contains(TRANSPILER_OUTPUTS_PATH)
+    val missingVendoredManifest =
+        output.contains("the package manifest at") && output.contains("cannot be accessed")
+    if (touchesTranspilerOutputs && missingVendoredManifest) return true
+
+    return STALE_BRIDGE_SYMBOLS.any { symbol ->
+        // Kotlin 2.x quotes the symbol; 1.x uses a colon. Match both.
+        output.contains("Unresolved reference '$symbol'") ||
+            output.contains("Unresolved reference: $symbol")
+    }
+}
+
+/** skip-bridge runtime symbols; unresolved in generated Kotlin ⇒ the bridge packages vanished mid-graph. */
+private val STALE_BRIDGE_SYMBOLS = listOf(
+    "SwiftPeerBridged",
+    "SwiftProjecting",
+    "SwiftObjectPointer",
+    "SwiftPeer",
+    "SwiftObjectNil",
+    "SkipLogger",
+    "sref",
+)
+
+/** True when the AAR has a classes.jar containing at least one compiled class. */
+internal fun aarHasCompiledClasses(aar: File): Boolean {
+    ZipFile(aar).use { zip ->
+        val classesJar = zip.getEntry("classes.jar") ?: return false
+        zip.getInputStream(classesJar).use { jar ->
+            ZipInputStream(jar).use { entries ->
+                return generateSequence { entries.nextEntry }.any { it.name.endsWith(".class") }
+            }
+        }
     }
 }
