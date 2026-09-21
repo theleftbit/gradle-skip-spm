@@ -95,20 +95,26 @@ abstract class SkipSpmExtension {
 
     /**
      * What to do when the installed `skip` CLI version drifts from the version the shared package
-     * declares — the `Package.swift` requirement on `skip.git` takes priority (`exact:` must
-     * match the CLI exactly; `from:`-style ranges require at least that version). Only when the
-     * manifest has no recognized requirement does the `Package.resolved` pin provide a fallback. The CLI and the skipstone
+     * declares — the `Package.resolved` Skip pin is the exact target and takes priority over
+     * both `from:` and `exact:` in the manifest. Only when no resolved version is available does
+     * the `Package.swift` requirement on `skip.git` provide a fallback. The CLI and the skipstone
      * transpiler ship from the same repo and version stream, so drift between them causes cryptic
      * export failures far from the cause.
      *
-     * `"install"` (default) downloads the required official CLI into Gradle's user cache and
-     * uses it for this export only after a confirmed version mismatch, without modifying Homebrew
-     * or global PATH. Missing or unparseable CLI versions keep the previous export behavior. A compatible installed
-     * CLI is reused. `"warn"` logs mismatches, `"fail"` rejects them, `"off"` disables the check.
-     * Offline builds require a compatible installed CLI or an already cached download.
-     * Checked only when an export actually runs; packages that declare no skip version (e.g.
-     * SKIP_ENABLED-gated dependencies stripped from the committed lockfile, where `Package.swift`
-     * has no unconditional `skip.git` entry either) are never flagged.
+     * `"install"` (default) keeps a compatible active CLI; otherwise selects an installed CLI
+     * meeting the requirement. Exact requirements may reuse an older installed CLI. If none matches,
+     * Homebrew may install/upgrade to its latest release only when newer than the installed CLIs
+     * and compatible. Historical
+     * releases are never downloaded. Upgrades preserve old kegs; selection uses an absolute path.
+     * Missing or unparseable CLI versions keep the previous export behavior.
+     * `"warn"` logs mismatches, `"fail"` rejects them, `"off"` disables the check.
+     * Offline builds require an already installed compatible CLI. After a failed export, install
+     * mode retries once only if the requirement read before lockfile restoration is newer than
+     * the running CLI, retaining it across stale-output cleanup. This follows the package requirement;
+     * it does not establish that the version mismatch caused the failure. Offline builds and legacy
+     * modes never upgrade after an export failure.
+     * Checked only when an export actually runs. No installation occurs without a Skip requirement
+     * in the manifest or lockfile, including the lockfile produced by Android resolution.
      */
     abstract val skipVersionCheck: Property<String>
 

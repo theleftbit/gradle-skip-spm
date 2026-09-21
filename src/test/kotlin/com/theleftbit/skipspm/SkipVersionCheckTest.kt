@@ -61,17 +61,17 @@ class SkipVersionCheckTest {
     }
 
     @Test
-    fun `manifest minimum wins over the resolved pin`() {
+    fun `resolved pin wins over a manifest minimum`() {
         val req = expectedSkipVersion(
             """.package(url: "https://source.skip.tools/skip.git", from: "1.5.0"),""",
             resolvedWithSkipPin,
         )
-        assertEquals(SkipVersionRequirement("1.5.0", exact = false), req)
+        assertEquals(SkipVersionRequirement("1.9.3", exact = true), req)
     }
 
     @Test
-    fun `manifest exact requirement also wins over the resolved pin`() {
-        assertEquals(SkipVersionRequirement("1.9.11", exact = true), expectedSkipVersion(
+    fun `resolved pin wins over a manifest exact requirement`() {
+        assertEquals(SkipVersionRequirement("1.9.3", exact = true), expectedSkipVersion(
             """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.11"),""",
             resolvedWithSkipPin,
         ))
@@ -157,4 +157,16 @@ class SkipVersionCheckTest {
         assertEquals(0, compareDottedVersions("1.9", "1.9.0"))
         assertTrue(compareDottedVersions("0.17.2", "0.17.10") < 0)
     }
+    @Test
+    fun `stable release sorts after prereleases and build metadata does not affect precedence`() {
+        assertTrue(compareDottedVersions("1.9.11", "1.9.11-beta.1") > 0)
+        assertTrue(compareDottedVersions("1.9.11-beta.10", "1.9.11-beta.2") > 0)
+        assertTrue(compareDottedVersions("1.9.11-rc.1", "1.9.11-beta.10") > 0)
+        assertTrue(compareDottedVersions("1.9.11-beta.1", "1.9.11-beta") > 0)
+        assertTrue(compareDottedVersions("1.9.11-alpha", "1.9.11-1") > 0)
+        assertTrue(compareDottedVersions("1.9.11--1", "1.9.11-1") > 0)
+        assertEquals(0, compareDottedVersions("1.9.11+build.2", "1.9.11+build.1"))
+        assertNotNull(SkipVersionRequirement("1.9.11-beta.2", false).mismatchWith("1.9.11-beta.1"))
+    }
+
 }

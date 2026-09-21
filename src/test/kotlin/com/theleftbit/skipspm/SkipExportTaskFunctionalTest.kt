@@ -239,25 +239,61 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
-    fun `default mode exports with the cached required cli instead of a mismatched global cli`() {
+    fun `default mode exports with an older installed CLI without changing global CLI`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val oldCli = writeFakeSkip("exit 81")
-        val cache = File(projectDir, "cli-cache")
-        val cached = File(cache, "9.9.9/${SkipCliInstaller.platform()}/skip")
-        cached.parentFile.mkdirs()
-        cached.writeText(oldCli.readText().replace("1.9.3", "9.9.9").replace("exit 81", "cp \"${fixturesDir.absolutePath}\"/*.aar \"\$out\"/"))
-        cached.setExecutable(true)
+        val cellar = File(projectDir, "brew/Cellar/skip")
+        val installedCli = File(cellar, "1.9.2/bin/skip")
+        installedCli.parentFile.mkdirs()
+        installedCli.writeText(oldCli.readText().replace("1.9.3", "1.9.2").replace("exit 81", "cp \"${fixturesDir.absolutePath}\"/*.aar \"\$out\"/"))
+        installedCli.setExecutable(true)
         val result = runner(
             oldCli,
-            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.2"),""",
             extraTaskConfig = """
-                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
                 offline.set(true)
-            """.trimIndent(),
+            """,
         ).build()
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertContains(result.output, "selecting Skip CLI 9.9.9")
+        assertContains(result.output, "selecting Skip CLI 1.9.2")
         assertContains(oldCli.readText(), "1.9.3")
+    }
+
+    @Test
+    fun `default mode upgrades Homebrew and exports with the newly installed CLI`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val active = writeFakeSkip("exit 81")
+        val previous = File(projectDir, "brew/Cellar/skip/1.9.3/bin/skip")
+        previous.parentFile.mkdirs()
+        active.copyTo(previous)
+        previous.setExecutable(true)
+        File(projectDir, "new-skip").apply {
+            writeText(active.readText().replace("1.9.3", "9.9.9").replace("exit 81", """
+                printenv PATH > "${File(projectDir, "child-path").absolutePath}"
+                cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """.trimIndent()))
+            setExecutable(true)
+        }
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.7"),""",
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertEquals(listOf("--cellar", "--prefix", "update", "info --json=v2 --formula skip", "upgrade --formula skip"),
+            File(projectDir, "brew-calls").readLines())
+        assertContains(previous.readText(), "Skip version 1.9.3")
+        val selectedBin = File(projectDir, "brew/Cellar/skip/9.9.9/bin").canonicalFile
+        assertEquals(selectedBin, File(File(projectDir, "child-path").readText().substringBefore(':')).canonicalFile)
+    }
+
+    @Test
+    fun `missing older exact CLI fails without updating Homebrew or exporting`() {
+        val active = writeFakeSkip("touch \"${invocationMarker.absolutePath}\"; exit 81")
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.2"),""",
+        ).buildAndFail()
+        assertContains(result.output, "Older versions may only be reused when already installed")
+        assertEquals(listOf("--cellar", "--prefix"), File(projectDir, "brew-calls").readLines())
+        assertFalse(invocationMarker.exists())
     }
 
     @Test
@@ -272,12 +308,11 @@ class SkipExportTaskFunctionalTest {
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
             extraTaskConfig = """
                 offline.set(true)
-                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
                 gradleInstallBinDir.set("/fake/gradle/bin")
             """,
         ).build()
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(File(projectDir, "brew-calls").exists())
         assertEquals("/fake/gradle/bin:/opt/homebrew/bin:/usr/local/bin:${System.getenv("PATH")}\n", pathDump.readText())
     }
 
@@ -304,11 +339,10 @@ class SkipExportTaskFunctionalTest {
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
             extraTaskConfig = """
                 offline.set(true)
-                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
             """,
         ).build()
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(File(projectDir, "brew-calls").exists())
         assertFalse(result.output.contains("selecting Skip CLI"))
     }
 
@@ -318,16 +352,15 @@ class SkipExportTaskFunctionalTest {
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
             extraTaskConfig = """
                 offline.set(true)
-                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
             """,
         ).buildAndFail()
         assertContains(result.output, "missing-skip")
-        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(File(projectDir, "brew-calls").exists())
         assertFalse(result.output.contains("selecting Skip CLI"))
     }
 
     @Test
-    fun `credential failures do not install or retry the CLI`() {
+    fun `credential failures with an exact requirement do not install or retry the CLI`() {
         val fakeSkip = writeFakeSkip("""
             echo export >> "${invocationMarker.absolutePath}"
             echo "Failed to find credentials for https://github.com in keychain: status -25308" >&2
@@ -335,11 +368,10 @@ class SkipExportTaskFunctionalTest {
         """)
         val result = runner(fakeSkip,
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
-            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
         ).buildAndFail()
         assertContains(result.output, "status -25308")
         assertEquals(listOf("export"), invocationMarker.readLines())
-        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(File(projectDir, "brew-calls").exists())
     }
 
     @Test
@@ -347,7 +379,6 @@ class SkipExportTaskFunctionalTest {
         val fakeSkip = writeFakeSkip("""touch "${invocationMarker.absolutePath}"; exit 1""")
         val result = runner(fakeSkip,
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
-            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
         ).withArguments("exportTest", "--offline").buildAndFail()
         assertContains(result.output, "Run once without --offline")
         assertFalse(invocationMarker.exists())
@@ -357,25 +388,24 @@ class SkipExportTaskFunctionalTest {
     fun `managed CLI respects resolved pin restores lockfile and reuses configuration cache`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val fakeSkip = writeFakeSkip("exit 81")
-        val cached = File(projectDir, "cli-cache/9.9.9/${SkipCliInstaller.platform()}/skip")
-        cached.parentFile.mkdirs()
-        cached.writeText(fakeSkip.readText().replace("1.9.3", "9.9.9").replace("exit 81", """
+        val installedCli = File(projectDir, "brew/Cellar/skip/9.9.9/bin/skip")
+        installedCli.parentFile.mkdirs()
+        installedCli.writeText(fakeSkip.readText().replace("1.9.3", "9.9.9").replace("exit 81", """
             echo export >> "${invocationMarker.absolutePath}"
             echo changed > "${File(pkgDir, "Package.resolved").absolutePath}"
             printenv PATH > "${File(projectDir, "child-path").absolutePath}"
             cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
         """.trimIndent()))
-        cached.setExecutable(true)
+        installedCli.setExecutable(true)
         val gradleRunner = runner(fakeSkip,
             packageSwift = "// swift-tools-version:5.9",
-            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
         ).withArguments("exportTest", "--offline", "--configuration-cache")
         val lockfile = File(pkgDir, "Package.resolved")
         val original = """{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}"""
         lockfile.writeText(original)
         assertEquals(TaskOutcome.SUCCESS, gradleRunner.build().task(":exportTest")?.outcome)
         assertEquals(original, lockfile.readText())
-        assertEquals(cached.parentFile.canonicalFile, File(File(projectDir, "child-path").readText().substringBefore(':')).canonicalFile)
+        assertEquals(installedCli.parentFile.canonicalFile, File(File(projectDir, "child-path").readText().substringBefore(':')).canonicalFile)
         val unchanged = gradleRunner.build()
         assertEquals(TaskOutcome.UP_TO_DATE, unchanged.task(":exportTest")?.outcome)
         assertContains(unchanged.output, "Reusing configuration cache")
@@ -407,18 +437,360 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
-    fun `installed CLI satisfying manifest minimum is reused despite a different resolved pin`() {
+    fun `resolved pin is enforced even when the active CLI satisfies the manifest minimum`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
         val gradleRunner = runner(fakeSkip,
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
-            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
         ).withArguments("exportTest", "--offline")
         File(pkgDir, "Package.resolved").writeText("""{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}""")
+        val result = gradleRunner.buildAndFail()
+        assertContains(result.output, "no compatible Skip CLI is installed")
+        assertContains(result.output, "selecting Skip CLI")
+        assertEquals(listOf("--cellar", "--prefix"), File(projectDir, "brew-calls").readLines())
+    }
+
+    @Test
+    fun `compatible manifest minimum keeps active CLI without querying Homebrew`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val active = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        val newest = File(projectDir, "brew/Cellar/skip/1.9.11/bin/skip")
+        newest.parentFile.mkdirs()
+        newest.writeText(active.readText().replace("1.9.3", "1.9.11"))
+        newest.setExecutable(true)
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).withArguments("exportTest", "--offline").build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `newer resolved requirement retries once preserving original pin and child PATH`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${lockfile.absolutePath}"
+            echo "export failed with this toolchain" >&2
+            exit 1
+        """)
+        val oldKeg = File(projectDir, "brew/Cellar/skip/1.9.3/bin/skip")
+        oldKeg.parentFile.mkdirs()
+        active.copyTo(oldKeg)
+        oldKeg.setExecutable(true)
+        writeFakeSkip("""
+            echo new >> "${invocationMarker.absolutePath}"
+            cp "${lockfile.absolutePath}" "${File(projectDir, "observed-lockfile").absolutePath}"
+            echo changed > "${lockfile.absolutePath}"
+            printenv PATH > "${File(projectDir, "child-path").absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """, version = "9.9.9", name = "new-skip")
+        val gradleRunner = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).withArguments("exportTest", "--configuration-cache")
+        val original = """{"pins":[{"identity":"skip","state":{"version":"1.9.3"}}]}"""
+        lockfile.writeText(original)
         val result = gradleRunner.build()
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertFalse(result.output.contains("selecting Skip CLI"))
-        assertFalse(File(projectDir, "cli-cache").exists())
+        assertEquals(listOf("old", "new"), invocationMarker.readLines())
+        assertEquals(original, lockfile.readText())
+        assertEquals(original, File(projectDir, "observed-lockfile").readText())
+        assertEquals(1, File(projectDir, "brew-calls").readLines().count { it == "update" })
+        assertContains(File(projectDir, "brew-calls").readText(), "upgrade --formula skip")
+        assertTrue(oldKeg.canExecute())
+        assertEquals(File(projectDir, "brew/Cellar/skip/9.9.9/bin").canonicalFile,
+            File(File(projectDir, "child-path").readText().substringBefore(':')).canonicalFile)
+    }
+
+    @Test
+    fun `newer Skip requirement survives repeated stale-output failures`() {
+        assertVersionRecoveryAfterCleanup("""echo "Unresolved reference 'SwiftPeerBridged'" >&2; exit 1""")
+    }
+
+    @Test
+    fun `newer Skip requirement survives a clean retry failing before resolution`() {
+        assertVersionRecoveryAfterCleanup(
+            """echo "Unresolved reference 'SwiftPeerBridged'" >&2; exit 1""",
+            """echo "compilation failed before dependency resolution" >&2; exit 1""",
+        )
+    }
+
+    @Test
+    fun `newer Skip requirement survives husk AAR validation and cleanup`() {
+        val huskDir = File(projectDir, "husk-aars")
+        writeAar(huskDir, "TestModule-debug.aar", emptyList())
+        assertVersionRecoveryAfterCleanup("""cp "${huskDir.absolutePath}"/*.aar "${'$'}out"/; exit 0""")
+    }
+
+    @Test
+    fun `newer Skip requirement recovers a stale failure with no outputs to clean`() {
+        assertVersionRecoveryAfterCleanup(
+            """echo "Unresolved reference 'SwiftPeerBridged'" >&2; exit 1""",
+            hasOutputs = false,
+        )
+    }
+
+    private fun assertVersionRecoveryAfterCleanup(
+        initialFailure: String,
+        cleanFailure: String = initialFailure,
+        hasOutputs: Boolean = true,
+    ) {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""
+            if [ ! -f "${invocationMarker.absolutePath}" ]; then
+                echo old >> "${invocationMarker.absolutePath}"
+                echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${lockfile.absolutePath}"
+                $initialFailure
+            fi
+            echo old >> "${invocationMarker.absolutePath}"
+            $cleanFailure
+        """)
+        writeFakeSkip("""
+            echo new >> "${invocationMarker.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """, version = "9.9.9", name = "new-skip")
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        )
+        val original = """{"pins":[{"identity":"skip","state":{"version":"1.9.3"}}]}"""
+        lockfile.writeText(original)
+        if (hasOutputs) transpilerOutputs.mkdirs()
+        val result = build.build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertEquals(if (hasOutputs) listOf("old", "old", "new") else listOf("old", "new"),
+            invocationMarker.readLines())
+        assertEquals(original, lockfile.readText())
+        assertFalse(transpilerOutputs.exists())
+        assertEquals(1, File(projectDir, "brew-calls").readLines().count { it == "update" })
+        assertTrue(aarHasCompiledOutput(File(projectDir, "lib/debug/TestModule-debug.aar")))
+    }
+
+    @Test
+    fun `newer package requirement triggers one upgrade even if a compilation error persists`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${File(pkgDir, "Package.resolved").absolutePath}"
+            echo "error: cannot find 'myMissingVariable' in scope" >&2
+            exit 1
+        """)
+        writeFakeSkip("""
+            echo new >> "${invocationMarker.absolutePath}"
+            echo "error: cannot find 'myMissingVariable' in scope" >&2
+            exit 1
+        """, version = "9.9.9", name = "new-skip")
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).buildAndFail()
+        assertContains(result.output, "cannot find 'myMissingVariable'")
+        assertEquals(listOf("old", "new"), invocationMarker.readLines())
+        assertEquals(1, File(projectDir, "brew-calls").readLines().count { it == "update" })
+    }
+
+    @Test
+    fun `manifest fallback gets no further retries after upgrade even for transient errors`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${File(pkgDir, "Package.resolved").absolutePath}"
+            exit 1
+        """)
+        writeFakeSkip("""
+            echo new >> "${invocationMarker.absolutePath}"
+            echo "could not resolve host" >&2
+            exit 1
+        """, version = "9.9.9", name = "new-skip")
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).buildAndFail()
+        assertEquals(listOf("old", "new"), invocationMarker.readLines())
+        assertEquals(1, File(projectDir, "brew-calls").readLines().count { it == "update" })
+        assertFalse(result.output.contains("retrying in"))
+    }
+
+    @Test
+    fun `manifest fallback does not retry when Homebrew has no newer release`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${File(pkgDir, "Package.resolved").absolutePath}"
+            exit 1
+        """)
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+            extraEnv = mapOf("TEST_SKIP_LATEST" to "1.9.3"),
+        ).buildAndFail()
+        assertEquals(listOf("old"), invocationMarker.readLines())
+        assertContains(result.output, "Skip CLI recovery failed")
+        assertContains(result.output, "skip export failed (exit 1)")
+        assertEquals("info --json=v2 --formula skip", File(projectDir, "brew-calls").readLines().last())
+    }
+
+    @Test
+    fun `failed compatible CLI stays offline without attempting an upgrade`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${File(pkgDir, "Package.resolved").absolutePath}"
+            exit 1
+        """)
+        runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).withArguments("exportTest", "--offline").buildAndFail()
+        assertEquals(listOf("old"), invocationMarker.readLines())
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `legacy warn mode does not upgrade after a compatible CLI fails`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${File(pkgDir, "Package.resolved").absolutePath}"
+            exit 1
+        """)
+        runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+            extraTaskConfig = """skipVersionCheck.set("warn")""",
+        ).buildAndFail()
+        assertEquals(listOf("old"), invocationMarker.readLines())
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `new Skip pin from Android resolution reuses an installed CLI and keeps generated lockfile`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}' > "${lockfile.absolutePath}"
+            exit 1
+        """)
+        val available = writeFakeSkip("""
+            echo new >> "${invocationMarker.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """, version = "9.9.9", name = "new-skip")
+        val installed = File(projectDir, "brew/Cellar/skip/9.9.9/bin/skip")
+        installed.parentFile.mkdirs()
+        available.copyTo(installed)
+        installed.setExecutable(true)
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertEquals(listOf("old", "new"), invocationMarker.readLines())
+        assertEquals(SkipVersionRequirement("9.9.9", true), expectedSkipVersion(null, lockfile.readText()))
+        assertEquals(listOf("--cellar", "--prefix"), File(projectDir, "brew-calls").readLines())
+    }
+
+    @Test
+    fun `manifest minimum does not upgrade for unrelated export failures`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo "fatal: Authentication failed; compilation failed" >&2
+            exit 1
+        """)
+        val result = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        ).buildAndFail()
+        assertContains(result.output, "Authentication failed")
+        assertEquals(listOf("old"), invocationMarker.readLines())
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `successful export keeps a lockfile that did not exist before`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""
+            echo generated > "${lockfile.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """)
+        val result = runner(active).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertEquals("generated\n", lockfile.readText())
+    }
+
+    @Test
+    fun `failed export keeps a lockfile that did not exist before`() {
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""echo generated > "${lockfile.absolutePath}"; exit 1""")
+        runner(active).buildAndFail()
+        assertEquals("generated\n", lockfile.readText())
+    }
+
+    @Test
+    fun `failed export leaves a deleted lockfile absent as before`() {
+        val lockfile = File(pkgDir, "Package.resolved")
+        val active = writeFakeSkip("""rm "${lockfile.absolutePath}"; exit 1""")
+        val build = runner(active, extraTaskConfig = """skipVersionCheck.set("off")""")
+        lockfile.writeText("original lockfile")
+        build.buildAndFail()
+        assertFalse(lockfile.exists())
+    }
+
+    @Test
+    fun `resolved pin matches active CLI even when manifest minimum differs`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val active = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "9.9.9"),""",
+        )
+        File(pkgDir, "Package.resolved").writeText("""{"pins":[{"identity":"skip","state":{"version":"1.9.3"}}]}""")
+        assertEquals(TaskOutcome.SUCCESS, build.build().task(":exportTest")?.outcome)
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `installs the newer resolved target regardless of the manifest exact requirement`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val active = writeFakeSkip("""echo old >> "${invocationMarker.absolutePath}"; exit 81""")
+        writeFakeSkip("""
+            echo resolved >> "${invocationMarker.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """, version = "9.9.9", name = "new-skip")
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+        )
+        val lockfile = File(pkgDir, "Package.resolved")
+        val original = """{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}"""
+        lockfile.writeText(original)
+        assertEquals(TaskOutcome.SUCCESS, build.build().task(":exportTest")?.outcome)
+        assertEquals(listOf("resolved"), invocationMarker.readLines())
+        assertContains(File(projectDir, "brew-calls").readText(), "install --formula skip")
+        assertEquals(original, lockfile.readText())
+    }
+
+    @Test
+    fun `credential failure on the resolved CLI never upgrades past that pin`() {
+        val active = writeFakeSkip("""
+            echo export >> "${invocationMarker.absolutePath}"
+            echo "Failed to find credentials in keychain: status -25308" >&2
+            exit 1
+        """)
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        )
+        File(pkgDir, "Package.resolved").writeText("""{"pins":[{"identity":"skip","state":{"version":"1.9.3"}}]}""")
+        val result = build.buildAndFail()
+        assertContains(result.output, "status -25308")
+        assertEquals(listOf("export"), invocationMarker.readLines())
+        assertFalse(File(projectDir, "brew-calls").exists())
+    }
+
+    @Test
+    fun `failed export after installing resolved CLI does not install a different version`() {
+        val active = writeFakeSkip("exit 81")
+        writeFakeSkip("""
+            echo resolved >> "${invocationMarker.absolutePath}"
+            echo "compilation failed" >&2
+            exit 1
+        """, version = "9.9.9", name = "new-skip")
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+        )
+        File(pkgDir, "Package.resolved").writeText("""{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}""")
+        val result = build.buildAndFail()
+        assertContains(result.output, "compilation failed")
+        assertEquals(listOf("resolved"), invocationMarker.readLines())
+        assertEquals(1, File(projectDir, "brew-calls").readLines().count { it == "update" })
     }
 
     private fun runner(
@@ -452,16 +824,41 @@ class SkipExportTaskFunctionalTest {
             .withProjectDir(projectDir)
             .withPluginClasspath()
             .withArguments("exportTest")
-            .withEnvironment(System.getenv() + extraEnv + ("SKIP_PATH" to fakeSkip.absolutePath))
+            .withEnvironment(System.getenv() + mapOf("SKIP_PATH" to fakeSkip.absolutePath, "SKIP_BREW_PATH" to writeFakeBrew().absolutePath) + extraEnv)
+    }
+
+    /** Never let functional tests inspect or mutate the host Homebrew installation. */
+    private fun writeFakeBrew(): File = File(projectDir, "fake-brew").apply {
+        writeText("""
+            #!/bin/bash
+            set -eu
+            echo "${'$'}*" >> "${File(projectDir, "brew-calls").absolutePath}"
+            test "${'$'}HOMEBREW_NO_INSTALL_CLEANUP" = 1
+            test "${'$'}HOMEBREW_NO_AUTO_UPDATE" = 1
+            case "${'$'}1" in
+              --cellar) echo "${File(projectDir, "brew/Cellar").absolutePath}" ;;
+              --prefix) echo "${File(projectDir, "brew").absolutePath}" ;;
+              update) ;;
+              info) echo "{\"formulae\":[{\"versions\":{\"stable\":\"${'$'}{TEST_SKIP_LATEST:-9.9.9}\"}}]}" ;;
+              install|upgrade)
+                test "${'$'}2" = --formula
+                test "${'$'}3" = skip
+                mkdir -p "${File(projectDir, "brew/Cellar/skip/9.9.9/bin").absolutePath}"
+                cp "${File(projectDir, "new-skip").absolutePath}" "${File(projectDir, "brew/Cellar/skip/9.9.9/bin/skip").absolutePath}"
+                ;;
+              *) exit 91 ;;
+            esac
+        """.trimIndent())
+        setExecutable(true)
     }
 
     /** A fake `skip` CLI: parses `-d <out>` like the real one, then runs [body]. */
-    private fun writeFakeSkip(body: String): File {
-        val script = File(projectDir, "fake-skip")
+    private fun writeFakeSkip(body: String, version: String = "1.9.3", name: String = "fake-skip"): File {
+        val script = File(projectDir, name)
         script.writeText(
             buildString {
                 appendLine("#!/bin/bash")
-                appendLine("if [ \"\$1\" = \"version\" ]; then echo \"Skip version 1.9.3\"; exit 0; fi")
+                appendLine("if [ \"\$1\" = \"version\" ]; then echo \"Skip version $version\"; exit 0; fi")
                 appendLine("out=\"\"")
                 appendLine("prev=\"\"")
                 appendLine("for a in \"\$@\"; do")
