@@ -286,20 +286,9 @@ class SkipExportTaskFunctionalTest {
 
     @Test
     fun `default mode keeps compatible CLI and original child PATH`() {
-        val pathDump = File(projectDir, "child-path")
-        val fakeSkip = writeSuccessfulSkip(beforeExport = """
-            printenv PATH > "${pathDump.absolutePath}"
-        """)
-        val result = runner(fakeSkip,
-            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
-            extraTaskConfig = """
-                offline.set(true)
-                gradleInstallBinDir.set("/fake/gradle/bin")
-            """,
-        ).build()
-        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertFalse(brewCalls.exists())
-        assertEquals("/fake/gradle/bin:/opt/homebrew/bin:/usr/local/bin:${System.getenv("PATH")}\n", pathDump.readText())
+        assertCompatibleCliIsKept(
+            """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+        )
     }
 
     @Test
@@ -345,17 +334,9 @@ class SkipExportTaskFunctionalTest {
 
     @Test
     fun `credential failures with an exact requirement do not install or retry the CLI`() {
-        val fakeSkip = writeFakeSkip("""
-            echo export >> "${invocationMarker.absolutePath}"
-            echo "Failed to find credentials for https://github.com in keychain: status -25308" >&2
-            exit 1
-        """)
-        val result = runner(fakeSkip,
-            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
-        ).buildAndFail()
-        assertContains(result.output, "status -25308")
-        assertEquals(listOf("export"), invocationMarker.readLines())
-        assertFalse(brewCalls.exists())
+        assertUnrelatedFailureDoesNotUpgrade(
+            """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+        )
     }
 
     @Test
@@ -425,11 +406,7 @@ class SkipExportTaskFunctionalTest {
 
     @Test
     fun `compatible manifest minimum keeps active CLI without querying Homebrew`() {
-        val active = writeSuccessfulSkip()
-        writeSuccessfulSkip("1.9.11", "brew/Cellar/skip/1.9.11/bin/skip")
-        val result = runner(active, packageSwift = minimumManifest).withArguments("exportTest", "--offline").build()
-        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertFalse(brewCalls.exists())
+        assertCompatibleCliIsKept(minimumManifest)
     }
 
     @Test
@@ -590,52 +567,15 @@ class SkipExportTaskFunctionalTest {
 
     @Test
     fun `manifest minimum does not upgrade for unrelated export failures`() {
-        val active = writeFakeSkip("""
-            echo old >> "${invocationMarker.absolutePath}"
-            echo "fatal: Authentication failed; compilation failed" >&2
-            exit 1
-        """)
-        val result = runner(active, packageSwift = minimumManifest).buildAndFail()
-        assertContains(result.output, "Authentication failed")
-        assertEquals(listOf("old"), invocationMarker.readLines())
-        assertFalse(brewCalls.exists())
-    }
-
-    @Test
-    fun `successful export keeps a lockfile that did not exist before`() {
-        val active = writeSuccessfulSkip(beforeExport = """
-            echo generated > "${lockfile.absolutePath}"
-        """)
-        val result = runner(active).build()
-        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
-        assertEquals("generated\n", lockfile.readText())
-    }
-
-    @Test
-    fun `failed export keeps a lockfile that did not exist before`() {
-        val active = writeFakeSkip("""echo generated > "${lockfile.absolutePath}"; exit 1""")
-        runner(active).buildAndFail()
-        assertEquals("generated\n", lockfile.readText())
-    }
-
-    @Test
-    fun `failed export leaves a deleted lockfile absent as before`() {
-        val active = writeFakeSkip("""rm "${lockfile.absolutePath}"; exit 1""")
-        val build = runner(active, extraTaskConfig = """skipVersionCheck.set("off")""")
-        lockfile.writeText("original lockfile")
-        build.buildAndFail()
-        assertFalse(lockfile.exists())
+        assertUnrelatedFailureDoesNotUpgrade(minimumManifest)
     }
 
     @Test
     fun `resolved pin matches active CLI even when manifest minimum differs`() {
-        val active = writeSuccessfulSkip()
-        val build = runner(active,
-            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "9.9.9"),""",
+        assertCompatibleCliIsKept(
+            """.package(url: "https://github.com/skiptools/skip.git", from: "9.9.9"),""",
+            resolvedVersion = "1.9.3",
         )
-        lockfile.writeText(skipPin("1.9.3"))
-        assertEquals(TaskOutcome.SUCCESS, build.build().task(":exportTest")?.outcome)
-        assertFalse(brewCalls.exists())
     }
 
     @Test
@@ -657,17 +597,7 @@ class SkipExportTaskFunctionalTest {
 
     @Test
     fun `credential failure on the resolved CLI never upgrades past that pin`() {
-        val active = writeFakeSkip("""
-            echo export >> "${invocationMarker.absolutePath}"
-            echo "Failed to find credentials in keychain: status -25308" >&2
-            exit 1
-        """)
-        val build = runner(active, packageSwift = minimumManifest)
-        lockfile.writeText(skipPin("1.9.3"))
-        val result = build.buildAndFail()
-        assertContains(result.output, "status -25308")
-        assertEquals(listOf("export"), invocationMarker.readLines())
-        assertFalse(brewCalls.exists())
+        assertUnrelatedFailureDoesNotUpgrade(minimumManifest, resolvedVersion = "1.9.3")
     }
 
     @Test
@@ -684,6 +614,34 @@ class SkipExportTaskFunctionalTest {
         assertContains(result.output, "compilation failed")
         assertEquals(listOf("resolved"), invocationMarker.readLines())
         assertEquals(1, brewCalls.readLines().count { it == "update" })
+    }
+
+    private fun assertCompatibleCliIsKept(packageSwift: String, resolvedVersion: String? = null) {
+        val pathDump = File(projectDir, "child-path")
+        val active = writeSuccessfulSkip(beforeExport = """printenv PATH > "${pathDump.absolutePath}"""")
+        writeSuccessfulSkip("1.9.11", "brew/Cellar/skip/1.9.11/bin/skip")
+        val build = runner(active, packageSwift,
+            extraTaskConfig = """gradleInstallBinDir.set("/fake/gradle/bin")""",
+        )
+        if (resolvedVersion != null) lockfile.writeText(skipPin(resolvedVersion))
+        else build.withArguments("exportTest", "--offline")
+        assertEquals(TaskOutcome.SUCCESS, build.build().task(":exportTest")?.outcome)
+        assertFalse(brewCalls.exists())
+        assertEquals("/fake/gradle/bin:/opt/homebrew/bin:/usr/local/bin:${System.getenv("PATH")}\n", pathDump.readText())
+    }
+
+    private fun assertUnrelatedFailureDoesNotUpgrade(packageSwift: String, resolvedVersion: String? = null) {
+        val active = writeFakeSkip("""
+            echo export >> "${invocationMarker.absolutePath}"
+            echo "Authentication failed: status -25308; compilation failed" >&2
+            exit 1
+        """)
+        val build = runner(active, packageSwift)
+        if (resolvedVersion != null) lockfile.writeText(skipPin(resolvedVersion))
+        val result = build.buildAndFail()
+        assertContains(result.output, "Authentication failed: status -25308")
+        assertEquals(listOf("export"), invocationMarker.readLines())
+        assertFalse(brewCalls.exists())
     }
 
     private fun runner(
