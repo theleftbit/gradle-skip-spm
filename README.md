@@ -121,22 +121,40 @@ cryptic export failures far from the cause — transpile errors against a newer 
 unresolved bridge symbols in the generated Kotlin. Before each export the task compares
 `skip version` against the version the package declares:
 
-- the **`Package.resolved` pin** of the `skip` package, when the committed lockfile has one
-  (treated as exact), else
-- the **`Package.swift` requirement** on `skip.git`: `exact: "…"` must match the CLI exactly;
-  `from:` / `.upToNextMajor(from:)` only require the CLI to be at least that version.
+- the **`Package.swift` requirement** on `skip.git` takes priority: `exact: "…"` must match the
+  CLI exactly; `from:` / `.upToNextMajor(from:)` only require at least that version;
+- the **`Package.resolved` pin** is an exact fallback only when the manifest has no recognized
+  requirement. It does not override a minimum declared by the project.
 
-On drift the export **warns** by default:
+For example, `from: "1.9.7"` accepts an installed CLI 1.9.11 even if `Package.resolved`
+pins a different version. If the installed CLI is older than 1.9.7, install mode selects
+1.9.7 from the managed cache or downloads it. SwiftPM continues resolving the package libraries
+normally; the plugin does not change their requirements or lockfile.
 
-```
-skipSpm: the skip CLI is 1.9.4 but the package pins skip 1.9.3 (Package.swift/Package.resolved).
-Align them: update the pin to 1.9.4, or install skip 1.9.3.
-```
+By default (`skipVersionCheck = "install"`), a confirmed incompatible CLI is replaced
+**for this export** with the required official release downloaded from
+`github.com/skiptools/skip/releases`. It is cached under
+`$GRADLE_USER_HOME/caches/skip-spm/cli/<version>/<platform>/skip`, verified with
+`skip version`, and invoked by absolute path. The global Homebrew installation is unchanged.
+Compatible installed CLIs are reused, including explicit `skip.path` / `SKIP_PATH` overrides.
+For an incompatible override, use `"fail"`, `"warn"`, or `"off"` if you want to keep managing
+that executable yourself.
 
-Tune it with `skipVersionCheck = "fail"` (fail the export instead — recommended for CI) or
-`"off"`. The check only runs when an export actually runs, never fails on its own infrastructure
-(a missing/unparseable `skip version` is ignored), and packages that declare no skip version at
-all are never flagged.
+Cached installations work with `--offline`; a missing cache fails with instructions to run
+online once. Installation is serialized across tasks and Gradle daemons, and incomplete or
+incorrect downloads are never published as usable cache entries. Automatic installation
+supports macOS and Linux x86_64/arm64 release binaries. It installs the CLI only; Swift SDK,
+Android NDK, Java, Gradle, and Git credentials remain the runner's responsibility.
+
+Installation happens before export, only after `skip version` positively identifies a mismatch;
+other export failures (credentials, compilation, network) never trigger CLI installation.
+A missing CLI or unparseable version keeps the previous export behavior. Only a managed CLI
+adds its own directory to the child PATH; otherwise the original environment is preserved.
+
+The previous modes remain available: `"warn"` logs drift, `"fail"` rejects it, and `"off"`
+disables version checking. These legacy modes retain their handling of unparseable CLI
+versions. The check only runs when an export actually runs; packages declaring no Skip version
+continue using the installed CLI without an automatic download.
 
 ## Nested `gradle` builds
 

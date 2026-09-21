@@ -79,11 +79,22 @@ abstract class SkipExportTask : DefaultTask() {
 
     /**
      * What to do when the `skip` CLI version drifts from the version the package declares
-     * (see [verifySkipCliVersion]): `"warn"` (default), `"fail"`, or `"off"`. Not an input —
-     * it changes diagnostics, never the exported AARs.
+     * (see [selectSkipExecutable]): `"install"` (default), `"warn"`, `"fail"`, or `"off"`.
      */
-    @get:Internal
+    @get:Input
     abstract val skipVersionCheck: Property<String>
+
+    @get:Internal
+    abstract val skipCliCacheDir: DirectoryProperty
+
+    @get:Internal
+    abstract val offline: Property<Boolean>
+
+    init {
+        skipVersionCheck.convention("install")
+        skipCliCacheDir.fileValue(File(project.gradle.gradleUserHomeDir, "caches/skip-spm/cli"))
+        offline.convention(project.gradle.startParameter.isOffline)
+    }
 
     /**
      * `bin` directory of the Gradle installation running this build (the wrapper dist when
@@ -111,11 +122,13 @@ abstract class SkipExportTask : DefaultTask() {
     fun export() {
         val pkg = packageDir.get().asFile
         val out = outputDir.get().asFile
-        verifySkipCliVersion(pkg)
+        val installedExecutable = resolveSkipExecutable()
+        val executable = selectSkipExecutable(pkg, installedExecutable)
+        val managedSkipBin = if (executable != installedExecutable) File(executable).parent else null
         var selfCleaned = false
         while (true) {
             try {
-                exportOnce(pkg, out)
+                exportOnce(pkg, out, executable, managedSkipBin)
                 return
             } catch (stale: StaleTranspilerOutputsException) {
                 val transpilerOutputs = File(pkg, TRANSPILER_OUTPUTS_PATH)
@@ -143,13 +156,13 @@ abstract class SkipExportTask : DefaultTask() {
     }
 
     /** One full export attempt: run skip, normalize the AAR namespaces, reject husks. */
-    private fun exportOnce(pkg: File, out: File) {
+    private fun exportOnce(pkg: File, out: File, executable: String, managedSkipBin: String?) {
         out.mkdirs()
         // Drop stale AARs so a removed module's leftover can't linger and get consumed.
         out.listFiles { f -> f.extension == "aar" }?.forEach { it.delete() }
 
         val command = mutableListOf(
-            resolveSkipExecutable(), "export",
+            executable, "export",
             "--module", module.get(),
             "--project", pkg.name,
             "--no-export-project",
@@ -170,7 +183,7 @@ abstract class SkipExportTask : DefaultTask() {
         val resolvedLock = File(pkg, "Package.resolved")
         val lockBackup = if (resolvedLock.isFile) resolvedLock.readBytes() else null
         try {
-            runExportWithRetry(pkg, command)
+            runExportWithRetry(pkg, command, managedSkipBin)
         } finally {
             if (lockBackup != null && resolvedLock.isFile &&
                 !resolvedLock.readBytes().contentEquals(lockBackup)
@@ -199,41 +212,45 @@ abstract class SkipExportTask : DefaultTask() {
         }
     }
 
-    /**
-     * Preflights the `skip` CLI version against the version the package declares — the
-     * `Package.resolved` pin of the `skip` package when present, else the `Package.swift`
-     * requirement on `skip.git`. CLI and skipstone plugin ship from the same repo and version
-     * stream, so drift between them produces cryptic far-away failures (unresolved bridge symbols
-     * in generated Kotlin, transpiler errors against newer skip-fuse-ui). Per [skipVersionCheck]
-     * this warns (default), fails, or is off. Runs only when the export itself runs — an
-     * up-to-date export can't be hurt by drift. Never fails on check *infrastructure* (missing
-     * files, unparseable output): only a positively detected mismatch is reported.
-     */
-    private fun verifySkipCliVersion(pkg: File) {
-        val mode = skipVersionCheck.getOrElse("warn")
-        if (mode == "off") return
+    /** Select once so retries use the same verified CLI. Installation only runs during export. */
+    private fun selectSkipExecutable(pkg: File, executable: String): String {
+        val mode = skipVersionCheck.get()
+        if (mode == "off") return executable
         val expected = expectedSkipVersion(
             File(pkg, "Package.swift").takeIf { it.isFile }?.readText(),
             File(pkg, "Package.resolved").takeIf { it.isFile }?.readText(),
-        ) ?: return
-        val versionOutput = ByteArrayOutputStream()
-        val result = runCatching {
-            execOps.exec {
-                commandLine(resolveSkipExecutable(), "version")
-                isIgnoreExitValue = true
-                standardOutput = versionOutput
-                errorOutput = versionOutput
-            }
-        }.getOrNull() ?: return
-        if (result.exitValue != 0) return
-        val cliVersion = parseSkipCliVersion(versionOutput.toString()) ?: return
-        val mismatch = expected.mismatchWith(cliVersion) ?: return
+        ) ?: return executable
+        // Only a positively identified version mismatch enables automatic installation.
+        // Missing/broken/custom CLIs retain the previous export behavior.
+        val current = readSkipVersion(executable) ?: return executable
+        val mismatch = expected.mismatchWith(current) ?: return executable
+        if (mode == "install") {
+            logger.lifecycle("skipSpm: selecting Skip CLI ${expected.version} for this package (installed: $current).")
+            return SkipCliInstaller.install(
+                expected.version, skipCliCacheDir.get().asFile, SkipCliInstaller.platform(),
+                offline.get(), { readSkipVersion(it.absolutePath) },
+            ).absolutePath
+        }
         if (mode == "fail") {
             throw GradleException(
                 "skipSpm: $mismatch (set skipSpm.skipVersionCheck = \"warn\" or \"off\" to demote this).",
             )
         }
         logger.warn("skipSpm: $mismatch")
+        return executable
+    }
+
+    private fun readSkipVersion(executable: String): String? {
+        val output = ByteArrayOutputStream()
+        val result = runCatching {
+            execOps.exec {
+                commandLine(executable, "version")
+                isIgnoreExitValue = true
+                standardOutput = output
+                errorOutput = output
+            }
+        }.getOrNull() ?: return null
+        return if (result.exitValue == 0) parseSkipCliVersion(output.toString()) else null
     }
 
     /**
@@ -263,7 +280,7 @@ abstract class SkipExportTask : DefaultTask() {
      * [StaleTranspilerOutputsException] instead (retrying it against the same `.build/` state can
      * never succeed); [export] self-heals it by cleaning the outputs and re-exporting.
      */
-    private fun runExportWithRetry(pkg: File, command: List<String>) {
+    private fun runExportWithRetry(pkg: File, command: List<String>, managedSkipBin: String?) {
         var attempt = 1
         while (true) {
             // Tee the process output to the build console AND a buffer so we can classify a failure.
@@ -283,7 +300,7 @@ abstract class SkipExportTask : DefaultTask() {
                 val inheritedPath = System.getenv("PATH").orEmpty()
                 environment(
                     "PATH",
-                    (listOfNotNull(gradleInstallBinDir.orNull) +
+                    (listOfNotNull(gradleInstallBinDir.orNull, managedSkipBin) +
                         listOf("/opt/homebrew/bin", "/usr/local/bin", inheritedPath))
                         .filter { it.isNotEmpty() }
                         .joinToString(":"),

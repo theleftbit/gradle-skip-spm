@@ -195,13 +195,14 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
-    fun `warns by default when the skip CLI drifts from the manifest pin`() {
+    fun `warn mode preserves diagnostics when the skip CLI drifts from the manifest pin`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
 
         // Fake CLI reports 1.9.3; the manifest pins 9.9.9 exactly.
         val result = runner(
             fakeSkip,
+            extraTaskConfig = """skipVersionCheck.set("warn")""",
             packageSwift = """.package(url: "https://source.skip.tools/skip.git", exact: "9.9.9"),""",
         ).build()
 
@@ -237,6 +238,189 @@ class SkipExportTaskFunctionalTest {
         assertFalse(result.output.contains("skip CLI"), "no drift message expected")
     }
 
+    @Test
+    fun `default mode exports with the cached required cli instead of a mismatched global cli`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val oldCli = writeFakeSkip("exit 81")
+        val cache = File(projectDir, "cli-cache")
+        val cached = File(cache, "9.9.9/${SkipCliInstaller.platform()}/skip")
+        cached.parentFile.mkdirs()
+        cached.writeText(oldCli.readText().replace("1.9.3", "9.9.9").replace("exit 81", "cp \"${fixturesDir.absolutePath}\"/*.aar \"\$out\"/"))
+        cached.setExecutable(true)
+        val result = runner(
+            oldCli,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """
+                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
+                offline.set(true)
+            """.trimIndent(),
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertContains(result.output, "selecting Skip CLI 9.9.9")
+        assertContains(oldCli.readText(), "1.9.3")
+    }
+
+    @Test
+    fun `default mode keeps compatible CLI and original child PATH`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val pathDump = File(projectDir, "child-path")
+        val fakeSkip = writeFakeSkip("""
+            printenv PATH > "${pathDump.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """)
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+            extraTaskConfig = """
+                offline.set(true)
+                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
+                gradleInstallBinDir.set("/fake/gradle/bin")
+            """,
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(File(projectDir, "cli-cache").exists())
+        assertEquals("/fake/gradle/bin:/opt/homebrew/bin:/usr/local/bin:${System.getenv("PATH")}\n", pathDump.readText())
+    }
+
+    @Test
+    fun `off mode neither checks nor replaces a mismatched CLI`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        fakeSkip.writeText(fakeSkip.readText().replace("echo \"Skip version 1.9.3\"", "touch \"${invocationMarker.absolutePath}\"; echo \"Skip version 1.9.3\""))
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """skipVersionCheck.set("off")""",
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(invocationMarker.exists())
+        assertFalse(result.output.contains("selecting Skip CLI"))
+    }
+
+    @Test
+    fun `unknown CLI version preserves the original export without installing`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        fakeSkip.writeText(fakeSkip.readText().replace("Skip version 1.9.3", "Custom CLI using Swift 6.4.0"))
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """
+                offline.set(true)
+                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
+            """,
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(result.output.contains("selecting Skip CLI"))
+    }
+
+    @Test
+    fun `missing CLI still reports the original process failure`() {
+        val result = runner(File(projectDir, "missing-skip"),
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """
+                offline.set(true)
+                skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
+            """,
+        ).buildAndFail()
+        assertContains(result.output, "missing-skip")
+        assertFalse(File(projectDir, "cli-cache").exists())
+        assertFalse(result.output.contains("selecting Skip CLI"))
+    }
+
+    @Test
+    fun `credential failures do not install or retry the CLI`() {
+        val fakeSkip = writeFakeSkip("""
+            echo export >> "${invocationMarker.absolutePath}"
+            echo "Failed to find credentials for https://github.com in keychain: status -25308" >&2
+            exit 1
+        """)
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
+        ).buildAndFail()
+        assertContains(result.output, "status -25308")
+        assertEquals(listOf("export"), invocationMarker.readLines())
+        assertFalse(File(projectDir, "cli-cache").exists())
+    }
+
+    @Test
+    fun `offline mismatch fails before executing the wrong CLI`() {
+        val fakeSkip = writeFakeSkip("""touch "${invocationMarker.absolutePath}"; exit 1""")
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "9.9.9"),""",
+            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
+        ).withArguments("exportTest", "--offline").buildAndFail()
+        assertContains(result.output, "Run once without --offline")
+        assertFalse(invocationMarker.exists())
+    }
+
+    @Test
+    fun `managed CLI respects resolved pin restores lockfile and reuses configuration cache`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("exit 81")
+        val cached = File(projectDir, "cli-cache/9.9.9/${SkipCliInstaller.platform()}/skip")
+        cached.parentFile.mkdirs()
+        cached.writeText(fakeSkip.readText().replace("1.9.3", "9.9.9").replace("exit 81", """
+            echo export >> "${invocationMarker.absolutePath}"
+            echo changed > "${File(pkgDir, "Package.resolved").absolutePath}"
+            printenv PATH > "${File(projectDir, "child-path").absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """.trimIndent()))
+        cached.setExecutable(true)
+        val gradleRunner = runner(fakeSkip,
+            packageSwift = "// swift-tools-version:5.9",
+            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
+        ).withArguments("exportTest", "--offline", "--configuration-cache")
+        val lockfile = File(pkgDir, "Package.resolved")
+        val original = """{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}"""
+        lockfile.writeText(original)
+        assertEquals(TaskOutcome.SUCCESS, gradleRunner.build().task(":exportTest")?.outcome)
+        assertEquals(original, lockfile.readText())
+        assertEquals(cached.parentFile.canonicalFile, File(File(projectDir, "child-path").readText().substringBefore(':')).canonicalFile)
+        val unchanged = gradleRunner.build()
+        assertEquals(TaskOutcome.UP_TO_DATE, unchanged.task(":exportTest")?.outcome)
+        assertContains(unchanged.output, "Reusing configuration cache")
+        File(pkgDir, "Sources/placeholder.swift").appendText("\n// change")
+        val rebuilt = gradleRunner.build()
+        assertContains(rebuilt.output, "Reusing configuration cache")
+        assertEquals(TaskOutcome.SUCCESS, rebuilt.task(":exportTest")?.outcome)
+        assertEquals(listOf("export", "export"), invocationMarker.readLines())
+        assertEquals(original, lockfile.readText())
+    }
+
+    @Test
+    fun `transient fetch failure still retries with the selected CLI`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""
+            if [ ! -f "${invocationMarker.absolutePath}" ]; then
+              touch "${invocationMarker.absolutePath}"
+              echo "could not resolve host" >&2
+              exit 1
+            fi
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+        """)
+        val result = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.3"),""",
+        ).build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertContains(result.output, "retrying in 10s")
+        assertFalse(result.output.contains("selecting Skip CLI"))
+    }
+
+    @Test
+    fun `installed CLI satisfying manifest minimum is reused despite a different resolved pin`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        val gradleRunner = runner(fakeSkip,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),""",
+            extraTaskConfig = """skipCliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
+        ).withArguments("exportTest", "--offline")
+        File(pkgDir, "Package.resolved").writeText("""{"pins":[{"identity":"skip","state":{"version":"9.9.9"}}]}""")
+        val result = gradleRunner.build()
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(result.output.contains("selecting Skip CLI"))
+        assertFalse(File(projectDir, "cli-cache").exists())
+    }
+
     private fun runner(
         fakeSkip: File,
         packageSwift: String = "// swift-tools-version:5.9",
@@ -254,7 +438,7 @@ class SkipExportTaskFunctionalTest {
             tasks.register("exportTest", com.theleftbit.skipspm.SkipExportTask::class.java) {
                 packageDir.set(layout.projectDirectory.dir("pkg"))
                 sources.set(layout.projectDirectory.dir("pkg/Sources"))
-                manifests.from(layout.projectDirectory.file("pkg/Package.swift"))
+                manifests.from(layout.projectDirectory.file("pkg/Package.swift"), layout.projectDirectory.file("pkg/Package.resolved"))
                 module.set("TestModule")
                 buildMode.set("debug")
                 abis.set(listOf("arm64-v8a"))

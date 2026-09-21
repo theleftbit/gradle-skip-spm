@@ -95,13 +95,17 @@ abstract class SkipSpmExtension {
 
     /**
      * What to do when the installed `skip` CLI version drifts from the version the shared package
-     * declares — the `Package.resolved` pin of the `skip` package when present, else the
-     * `Package.swift` requirement on `skip.git` (`exact:` must match the CLI exactly; `from:`-style
-     * ranges only require the CLI to be at least that version). The CLI and the skipstone
+     * declares — the `Package.swift` requirement on `skip.git` takes priority (`exact:` must
+     * match the CLI exactly; `from:`-style ranges require at least that version). Only when the
+     * manifest has no recognized requirement does the `Package.resolved` pin provide a fallback. The CLI and the skipstone
      * transpiler ship from the same repo and version stream, so drift between them causes cryptic
      * export failures far from the cause.
      *
-     * `"warn"` (default) logs the mismatch, `"fail"` fails the export, `"off"` disables the check.
+     * `"install"` (default) downloads the required official CLI into Gradle's user cache and
+     * uses it for this export only after a confirmed version mismatch, without modifying Homebrew
+     * or global PATH. Missing or unparseable CLI versions keep the previous export behavior. A compatible installed
+     * CLI is reused. `"warn"` logs mismatches, `"fail"` rejects them, `"off"` disables the check.
+     * Offline builds require a compatible installed CLI or an already cached download.
      * Checked only when an export actually runs; packages that declare no skip version (e.g.
      * SKIP_ENABLED-gated dependencies stripped from the committed lockfile, where `Package.swift`
      * has no unconditional `skip.git` entry either) are never flagged.

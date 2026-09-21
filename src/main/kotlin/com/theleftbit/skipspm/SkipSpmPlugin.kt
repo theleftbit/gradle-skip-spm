@@ -42,7 +42,7 @@ class SkipSpmPlugin : Plugin<Project> {
         // convention, so seeding there rather than here is what keeps `put("internal","debug")` additive.
         ext.variantBuildMode.convention(emptyMap())
         ext.exposeAsApi.convention(false)
-        ext.skipVersionCheck.convention("warn")
+        ext.skipVersionCheck.convention("install")
         ext.consumers.convention(listOf(project.path))
         ext.childGradleBuildCache.convention(false)
 
@@ -118,8 +118,8 @@ class SkipSpmPlugin : Plugin<Project> {
         }
 
         project.afterEvaluate {
-            require(ext.skipVersionCheck.get() in listOf("warn", "fail", "off")) {
-                "skipSpm: skipVersionCheck must be \"warn\", \"fail\", or \"off\", was '${ext.skipVersionCheck.get()}'."
+            require(ext.skipVersionCheck.get() in listOf("install", "warn", "fail", "off")) {
+                "skipSpm: skipVersionCheck must be \"install\", \"warn\", \"fail\", or \"off\", was '${ext.skipVersionCheck.get()}'."
             }
             @Suppress("DEPRECATION")
             if (ext.pruneStaleTransforms.isPresent) {
