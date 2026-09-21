@@ -115,74 +115,40 @@ which deletes the package's entire `.build/`.
 
 ## Toolchain version check
 
-The `skip` CLI (Homebrew) and the skipstone transpiler (the `skip` SwiftPM package your
-`Package.swift` pins) ship from the same repo and version stream, and drift between them causes
-cryptic export failures far from the cause — transpile errors against a newer `skip-fuse-ui`,
-unresolved bridge symbols in the generated Kotlin. Before each export the task compares
-`skip version` against the version the package declares:
+Before export, `skip version` is compared with the **`Package.resolved` Skip pin first**
+(exact version), falling back to `Package.swift` when no resolved Skip version is available.
+The manifest's `exact:` requires that version; `from:` and `.upToNextMajor/Minor(from:)`
+are treated as minimums, as before.
 
-- the **`Package.resolved` Skip pin takes priority**, as in previous plugin versions. It is the
-  exact CLI target regardless of whether `Package.swift` declares `from:` or `exact:`;
-- only when no resolved Skip version is available does **`Package.swift` provide a fallback**:
-  `exact:` requires that version; `from:` / `.upToNextMajor(from:)` require at least that version.
+The default `skipVersionCheck = "install"` keeps a compatible active CLI without querying
+Homebrew. Otherwise it selects the newest compatible installation from Homebrew's Cellar
+or legacy Caskroom. Older versions and manually installed prereleases may be reused.
+Selection uses an absolute path and adds that CLI's directory to the child PATH without
+relinking the global command.
 
-For example, a resolved pin of `1.9.11` selects CLI `1.9.11` even if the manifest declares
-`from: "1.9.7"` and CLI `1.9.12` is installed. Updating the CLI never changes the resolved pin.
-If export fails, a newer Skip requirement resolved during that export can trigger one CLI update and retry.
+If no installed CLI qualifies, Homebrew is refreshed and its latest stable Skip formula is
+installed/upgraded only if it meets the requirement and is newer than all installed CLIs.
+Historical releases and prereleases are never downloaded automatically. An unavailable exact
+version fails, even if another newer release exists. `SKIP_BREW_PATH` can override Homebrew's path.
+Upgrading can change the global link. The plugin sets `HOMEBREW_NO_INSTALL_CLEANUP=1` to keep
+old installations; other Homebrew commands may still clean them. To retain them outside the
+plugin, set `HOMEBREW_NO_CLEANUP_FORMULAE=skip` (see the [Homebrew FAQ](https://docs.brew.sh/FAQ#how-do-i-keep-old-versions-of-a-formula-when-upgrading)).
 
-By default (`skipVersionCheck = "install"`), the active CLI is kept when it meets the requirement.
-Otherwise the selection works as follows:
+After a failed export, the requirement is read again **before restoring `Package.resolved`**.
+If Android resolution reveals a requirement newer than the running CLI, install mode selects
+or installs a suitable CLI and retries **once**. The requirement survives stale-output cleanup
+and empty-AAR failures. This follows the package requirement, not compiler messages: an unrelated
+compilation error may persist. With no suitable release, the original and recovery errors are
+reported. The final attempt has no further fetch, cleanup, or CLI-upgrade retries.
 
-1. Select the newest compatible CLI among the active executable and installations in Homebrew's
-   Skip Cellar or legacy Skip Caskroom, including an older version when the project requires it.
-   Invoke it by absolute path for this export; selecting an older version does not relink the
-   global `skip` command.
-2. If none matches, refresh Homebrew and check its latest stable Skip formula. Install or upgrade
-   only if that release is **newer than the installed CLIs** and meets the project's requirement.
-3. If an older exact version is missing, fail with a clear error. Never download historical
-   releases or install an older formula. A missing exact version that is no longer Homebrew's
-   latest release also fails, even when it would be newer than the installed CLI.
+`"warn"`, `"fail"`, and `"off"` keep their previous behavior and never install or recover by
+upgrading. `--offline` permits selection of installed versions before export, but no installation
+or CLI recovery after failure. Missing/unparseable CLI versions keep the previous export behavior;
+without a requirement in either package file there is no automatic installation. Checks run only
+when export runs. Swift SDK, Android NDK, Java, Gradle, and credentials remain runner responsibilities.
 
-A compatible active CLI, including an explicit `skip.path` / `SKIP_PATH` override, is used without
-querying Homebrew.
-New installations use stable Homebrew releases only. Prereleases must be installed manually;
-already installed prereleases may be selected, with the stable release ranked above prereleases
-of the same version. Homebrew is required to enumerate installed versions or install a new version;
-`SKIP_BREW_PATH` can override its executable for a custom installation.
-
-With `--offline`, only already installed CLIs can be selected. The plugin sets
-`HOMEBREW_NO_INSTALL_CLEANUP=1` for its Homebrew commands to retain old installations. Other
-Homebrew commands outside the plugin can still remove them; runners that need to preserve Skip
-versions should also export `HOMEBREW_NO_CLEANUP_FORMULAE=skip` in their environment (see the
-[Homebrew FAQ](https://docs.brew.sh/FAQ#how-do-i-keep-old-versions-of-a-formula-when-upgrading)).
-Installing/upgrading can update the globally linked formula, but selecting an existing CLI
-never changes global links. Swift SDK, Android NDK, Java, Gradle, and Git credentials remain
-the runner's responsibility.
-
-Before export, installation only runs when no installed CLI meets the requirement. The active
-CLI must report a parseable version. If export fails, the task reads the dependency requirement
-again **before restoring `Package.resolved`**: Android resolution can introduce a newer Skip pin
-than the one available before export. Only when this requirement is newer than the running CLI
-does install mode select/install it and retry export **once**. The resolved pin still takes
-priority over the manifest fallback. A failed build with no newer requirement does not trigger
-an update, even if Homebrew has a newer release. Requirements observed before stale-output cleanup
-are retained if the clean retry fails before resolving again, including failures from husk AARs.
-This is a version comparison, not a diagnosis of the error: a newer requirement can trigger an
-update even when an unrelated compilation error also exists. That error may persist on retry.
-Compiler messages or suggestions to run `skip upgrade` alone do not trigger an update.
-If no suitable newer CLI is available or upgrading fails, the task reports the original failure
-with the recovery error. The final attempt has no further fetch, stale-output, or CLI-upgrade
-retries. `--offline` and legacy `warn`/`fail`/`off` modes never recover by upgrading the CLI.
-As before, each export restores changed `Package.resolved` contents only when the file existed
-before the attempt and still exists afterward. Deleted files remain absent; newly generated
-lockfiles are kept.
-A missing CLI or unparseable version keeps the previous export behavior. Only a managed CLI
-adds its own directory to the child PATH; otherwise the original environment is preserved.
-
-The previous modes remain available: `"warn"` logs drift, `"fail"` rejects it, and `"off"`
-disables version checking. These legacy modes retain their handling of unparseable CLI
-versions. The check only runs when an export actually runs. Automatic installation requires a
-Skip version in the manifest or lockfile, including one produced during Android resolution.
+Lockfile restoration is unchanged: restore modified contents only if the file existed before and
+after the attempt. Deleted files remain absent; newly generated lockfiles are kept.
 
 ## Nested `gradle` builds
 

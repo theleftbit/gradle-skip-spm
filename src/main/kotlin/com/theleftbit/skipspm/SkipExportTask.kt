@@ -138,7 +138,7 @@ abstract class SkipExportTask : DefaultTask() {
             )
             val upgraded = try {
                 SkipCliInstaller.selectOrInstall(
-                    required, current, File(executable), false, { readSkipVersion(it.absolutePath) }, ::runBrew,
+                    required, current, false, { readSkipVersion(it.absolutePath) }, ::runBrew,
                 )
             } catch (upgradeFailure: Exception) {
                 throw GradleException("${failure.message} Skip CLI recovery failed: ${upgradeFailure.message}", failure)
@@ -268,11 +268,9 @@ abstract class SkipExportTask : DefaultTask() {
         if (mode == "install" && mismatch != null) {
             val requirement = if (expected.exact) expected.version else ">= ${expected.version}"
             logger.lifecycle("skipSpm: selecting Skip CLI $requirement for this package (active: $current).")
-            val selected = SkipCliInstaller.selectOrInstall(
-                expected, current, File(executable), offline.get(), { readSkipVersion(it.absolutePath) }, ::runBrew,
-            )
-            // Preserve a bare command or explicit override when the active CLI wins selection.
-            return if (selected == File(executable)) executable else selected.absolutePath
+            return SkipCliInstaller.selectOrInstall(
+                expected, current, offline.get(), { readSkipVersion(it.absolutePath) }, ::runBrew,
+            ).absolutePath
         }
         if (mismatch == null) return executable
         if (mode == "fail") {

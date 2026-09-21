@@ -52,7 +52,7 @@ class SkipCliInstallerTest {
         current: String = "1.9.3",
         offline: Boolean = false,
     ) = SkipCliInstaller.selectOrInstall(
-        SkipVersionRequirement(version, exact), current, File(prefix, "active-skip"),
+        SkipVersionRequirement(version, exact), current,
         offline, { it.readText() }, ::brew,
     )
 
@@ -80,27 +80,6 @@ class SkipCliInstallerTest {
         cli("1.9.8")
         val newest = cli("1.9.11")
         assertEquals(newest, select("1.9.7", exact = false, offline = true))
-        assertReadOnly()
-    }
-
-    @Test
-    fun `minimum selects newest installed even when the active CLI already satisfies it`() {
-        val newest = cli("1.9.11")
-        assertEquals(newest, select("1.9.0", exact = false, current = "1.9.3", offline = true))
-        assertReadOnly()
-    }
-
-    @Test
-    fun `active CLI outside Homebrew is kept when it is newer than all kegs`() {
-        cli("1.9.11")
-        assertEquals(File(prefix, "active-skip"), select("1.9.0", exact = false, current = "1.9.12"))
-        assertReadOnly()
-    }
-
-    @Test
-    fun `equal installed versions preserve the active executable`() {
-        cli("1.9.11")
-        assertEquals(File(prefix, "active-skip"), select("1.9.0", exact = false, current = "1.9.11"))
         assertReadOnly()
     }
 
@@ -204,7 +183,7 @@ class SkipCliInstallerTest {
     @Test
     fun `installed stable release wins over active beta with same core version`() {
         val stable = cli("1.9.11")
-        assertEquals(stable, select("1.9.0", exact = false, current = "1.9.11-beta.1"))
+        assertEquals(stable, select("1.9.11", exact = false, current = "1.9.11-beta.1"))
         assertReadOnly()
     }
 

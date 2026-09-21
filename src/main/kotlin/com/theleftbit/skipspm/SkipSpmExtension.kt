@@ -94,27 +94,11 @@ abstract class SkipSpmExtension {
     abstract val consumers: ListProperty<String>
 
     /**
-     * What to do when the installed `skip` CLI version drifts from the version the shared package
-     * declares — the `Package.resolved` Skip pin is the exact target and takes priority over
-     * both `from:` and `exact:` in the manifest. Only when no resolved version is available does
-     * the `Package.swift` requirement on `skip.git` provide a fallback. The CLI and the skipstone
-     * transpiler ship from the same repo and version stream, so drift between them causes cryptic
-     * export failures far from the cause.
-     *
-     * `"install"` (default) keeps a compatible active CLI; otherwise selects an installed CLI
-     * meeting the requirement. Exact requirements may reuse an older installed CLI. If none matches,
-     * Homebrew may install/upgrade to its latest release only when newer than the installed CLIs
-     * and compatible. Historical
-     * releases are never downloaded. Upgrades preserve old kegs; selection uses an absolute path.
-     * Missing or unparseable CLI versions keep the previous export behavior.
-     * `"warn"` logs mismatches, `"fail"` rejects them, `"off"` disables the check.
-     * Offline builds require an already installed compatible CLI. After a failed export, install
-     * mode retries once only if the requirement read before lockfile restoration is newer than
-     * the running CLI, retaining it across stale-output cleanup. This follows the package requirement;
-     * it does not establish that the version mismatch caused the failure. Offline builds and legacy
-     * modes never upgrade after an export failure.
-     * Checked only when an export actually runs. No installation occurs without a Skip requirement
-     * in the manifest or lockfile, including the lockfile produced by Android resolution.
+     * CLI version policy: `"install"` (default) reuses installed CLIs or installs a newer stable
+     * Homebrew release. `Package.resolved` takes priority over the manifest fallback.
+     * A compatible active CLI is kept; an export revealing a newer requirement can retry once.
+     * `"warn"` logs drift, `"fail"` rejects it, and `"off"` disables the check. Offline builds
+     * never install or retry with another CLI after failure. See README for selection details.
      */
     abstract val skipVersionCheck: Property<String>
 

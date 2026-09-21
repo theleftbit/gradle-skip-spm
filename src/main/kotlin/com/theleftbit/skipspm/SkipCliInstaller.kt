@@ -6,10 +6,10 @@ import java.io.File
 
 /** Reuses installed Homebrew CLIs; new installations may only move forwards. */
 internal object SkipCliInstaller {
+    /** Called only when the active CLI does not meet [expected]. */
     fun selectOrInstall(
         expected: SkipVersionRequirement,
         currentVersion: String,
-        currentExecutable: File,
         offline: Boolean,
         readVersion: (File) -> String?,
         brew: (List<String>) -> String,
@@ -26,10 +26,10 @@ internal object SkipCliInstaller {
             .filter { expected.mismatchWith(it.second) == null }
             .maxWithOrNull { a, b -> compareDottedVersions(a.second, b.second) }?.first
 
-        // Include the active CLI, which may be installed outside Homebrew. Keep its path on ties.
-        val candidates = listOf(currentExecutable to currentVersion) + installed()
+        val candidates = installed()
         compatible(candidates)?.let { return it }
-        val newestInstalled = candidates.maxWith { a, b -> compareDottedVersions(a.second, b.second) }.second
+        val newestInstalled = (candidates.map { it.second } + currentVersion)
+            .maxWith(::compareDottedVersions)
         if (expected.exact && compareDottedVersions(expected.version, newestInstalled) <= 0) {
             throw GradleException(
                 "skipSpm: Skip CLI ${expected.version} is not installed. Older versions may only be reused " +
