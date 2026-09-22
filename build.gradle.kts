@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.theleftbit"
-version = "0.5.1"
+version = "0.6.0"
 
 dependencies {
     // Applied on the consuming root project to register the afterSync trigger that keeps the
