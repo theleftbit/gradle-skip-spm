@@ -94,17 +94,11 @@ abstract class SkipSpmExtension {
     abstract val consumers: ListProperty<String>
 
     /**
-     * What to do when the installed `skip` CLI version drifts from the version the shared package
-     * declares — the `Package.resolved` pin of the `skip` package when present, else the
-     * `Package.swift` requirement on `skip.git` (`exact:` must match the CLI exactly; `from:`-style
-     * ranges only require the CLI to be at least that version). The CLI and the skipstone
-     * transpiler ship from the same repo and version stream, so drift between them causes cryptic
-     * export failures far from the cause.
-     *
-     * `"warn"` (default) logs the mismatch, `"fail"` fails the export, `"off"` disables the check.
-     * Checked only when an export actually runs; packages that declare no skip version (e.g.
-     * SKIP_ENABLED-gated dependencies stripped from the committed lockfile, where `Package.swift`
-     * has no unconditional `skip.git` entry either) are never flagged.
+     * CLI version policy: `"install"` (default) reuses installed CLIs or installs a newer stable
+     * Homebrew release. `Package.resolved` takes priority over the manifest fallback.
+     * A compatible active CLI is kept; an export revealing a newer requirement can retry once.
+     * `"warn"` logs drift, `"fail"` rejects it, and `"off"` disables the check. Offline builds
+     * never install or retry with another CLI after failure. See README for selection details.
      */
     abstract val skipVersionCheck: Property<String>
 

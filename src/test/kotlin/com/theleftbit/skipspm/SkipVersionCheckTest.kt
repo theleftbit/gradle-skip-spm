@@ -61,12 +61,26 @@ class SkipVersionCheckTest {
     }
 
     @Test
-    fun `resolved pin wins over the manifest and is exact`() {
+    fun `resolved pin wins over a manifest minimum`() {
         val req = expectedSkipVersion(
             """.package(url: "https://source.skip.tools/skip.git", from: "1.5.0"),""",
             resolvedWithSkipPin,
         )
         assertEquals(SkipVersionRequirement("1.9.3", exact = true), req)
+    }
+
+    @Test
+    fun `resolved pin wins over a manifest exact requirement`() {
+        assertEquals(SkipVersionRequirement("1.9.3", exact = true), expectedSkipVersion(
+            """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.11"),""",
+            resolvedWithSkipPin,
+        ))
+    }
+
+    @Test
+    fun `resolved pin is used when manifest has no version requirement`() {
+        assertEquals(SkipVersionRequirement("1.9.3", exact = true),
+            expectedSkipVersion("// swift-tools-version:5.9", resolvedWithSkipPin))
     }
 
     @Test
@@ -80,6 +94,22 @@ class SkipVersionCheckTest {
     }
 
     @Test
+    fun `branch pin never borrows the version of the following package`() {
+        assertNull(expectedSkipVersion(null, """
+            {"pins":[
+              {"identity":"skip","state":{"branch":"main","revision":"abc"}},
+              {"identity":"skip-unit","state":{"version":"1.7.2"}}
+            ]}
+        """))
+    }
+
+    @Test
+    fun `resolved pin parsing does not depend on JSON key order`() {
+        assertEquals(SkipVersionRequirement("1.9.11", true), expectedSkipVersion(null,
+            """{"pins":[{"state":{"version":"1.9.11"},"identity":"skip"}]}"""))
+    }
+
+    @Test
     fun `no declaration anywhere means no check`() {
         assertNull(expectedSkipVersion("// swift-tools-version:5.9", packageResolved = null))
         assertNull(expectedSkipVersion(null, null))
@@ -89,6 +119,20 @@ class SkipVersionCheckTest {
     fun `cli version parses from skip version output`() {
         assertEquals("1.9.4", parseSkipCliVersion("Skip version 1.9.4"))
         assertNull(parseSkipCliVersion("command not found"))
+    }
+
+    @Test
+    fun `version parsing ignores numbers in warnings`() {
+        assertEquals("1.9.11", parseSkipCliVersion("Warning: Swift 6.4.0 detected\nSkip version 1.9.11\n"))
+        assertNull(parseSkipCliVersion("Error: requires Swift 6.4.0"))
+    }
+
+    @Test
+    fun `prerelease cli is not mistaken for a stable release`() {
+        val prerelease = parseSkipCliVersion("Skip version 1.9.11-beta.1")!!
+        assertEquals("1.9.11-beta.1", prerelease)
+        assertNotNull(SkipVersionRequirement("1.9.11", exact = true).mismatchWith(prerelease))
+        assertNotNull(SkipVersionRequirement("1.9.11", exact = false).mismatchWith(prerelease))
     }
 
     @Test
@@ -113,4 +157,16 @@ class SkipVersionCheckTest {
         assertEquals(0, compareDottedVersions("1.9", "1.9.0"))
         assertTrue(compareDottedVersions("0.17.2", "0.17.10") < 0)
     }
+    @Test
+    fun `stable release sorts after prereleases and build metadata does not affect precedence`() {
+        assertTrue(compareDottedVersions("1.9.11", "1.9.11-beta.1") > 0)
+        assertTrue(compareDottedVersions("1.9.11-beta.10", "1.9.11-beta.2") > 0)
+        assertTrue(compareDottedVersions("1.9.11-rc.1", "1.9.11-beta.10") > 0)
+        assertTrue(compareDottedVersions("1.9.11-beta.1", "1.9.11-beta") > 0)
+        assertTrue(compareDottedVersions("1.9.11-alpha", "1.9.11-1") > 0)
+        assertTrue(compareDottedVersions("1.9.11--1", "1.9.11-1") > 0)
+        assertEquals(0, compareDottedVersions("1.9.11+build.2", "1.9.11+build.1"))
+        assertNotNull(SkipVersionRequirement("1.9.11-beta.2", false).mismatchWith("1.9.11-beta.1"))
+    }
+
 }

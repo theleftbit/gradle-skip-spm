@@ -1,5 +1,7 @@
 package com.theleftbit.skipspm
 
+import groovy.json.JsonSlurper
+
 /**
  * The skip toolchain version a package declares, extracted from `Package.resolved` /
  * `Package.swift`. When the `skip` CLI (Homebrew) and the pinned `skip` SwiftPM package (the
@@ -14,7 +16,7 @@ internal data class SkipVersionRequirement(
 ) {
     /** A human-readable description of the mismatch with [cliVersion], or null when compatible. */
     fun mismatchWith(cliVersion: String): String? = when {
-        exact && compareDottedVersions(cliVersion, version) != 0 ->
+        exact && cliVersion != version ->
             "the skip CLI is $cliVersion but the package pins skip $version " +
                 "(Package.swift/Package.resolved). Align them: update the pin to $cliVersion, or " +
                 "install skip $version."
@@ -26,17 +28,17 @@ internal data class SkipVersionRequirement(
 }
 
 /**
- * The skip version the package declares. The `Package.resolved` pin wins when present (it is what
- * the export actually builds with); otherwise the `Package.swift` requirement on `skip.git` is
- * used. Returns null when neither declares one (e.g. polymarket-style packages whose skip
- * dependencies are SKIP_ENABLED-gated and stripped from the committed lockfile) — the check is
- * then skipped entirely.
+ * Package.resolved is authoritative: its Skip pin is the exact CLI target, regardless of the
+ * manifest's from/exact requirement. As before, Package.swift is a fallback only when there is
+ * no usable resolved Skip version. Returns null when neither file declares a version.
  */
 internal fun expectedSkipVersion(packageSwift: String?, packageResolved: String?): SkipVersionRequirement? {
     packageResolved?.let { resolved ->
-        // Package.resolved v2/v3 pins are key-sorted objects, so skip's own "version" is the first
-        // one after its "identity". `"skip"` is exact-quoted, so skip-bridge/skip-fuse don't match.
-        RESOLVED_SKIP_PIN.find(resolved)?.let { return SkipVersionRequirement(it.groupValues[1], exact = true) }
+        val document = runCatching { JsonSlurper().parseText(resolved) as? Map<*, *> }.getOrNull()
+        val pin = (document?.get("pins") as? List<*>)?.filterIsInstance<Map<*, *>>()
+            ?.firstOrNull { it["identity"] == "skip" }
+        val version = (pin?.get("state") as? Map<*, *>)?.get("version") as? String
+        if (version != null) return SkipVersionRequirement(version, exact = true)
     }
     packageSwift?.let { manifest ->
         MANIFEST_SKIP_REQUIREMENT.find(manifest)?.let { match ->
@@ -51,23 +53,44 @@ internal fun expectedSkipVersion(packageSwift: String?, packageResolved: String?
     return null
 }
 
-/** First dotted version in `skip version` output (`Skip version 1.9.4` → `1.9.4`), or null. */
+/** Read only the CLI version line; warnings may contain unrelated tool versions. */
 internal fun parseSkipCliVersion(output: String): String? =
-    Regex("""(\d+(?:\.\d+)+)""").find(output)?.groupValues?.get(1)
+    Regex("""(?m)^Skip version (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\s*$""")
+        .find(output)?.groupValues?.get(1)
 
-/** Numeric segment-wise comparison; missing segments count as 0 (`1.9` == `1.9.0`). */
+/** Semantic version precedence, ignoring build metadata; missing core segments count as zero. */
 internal fun compareDottedVersions(a: String, b: String): Int {
-    val aParts = a.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-    val bParts = b.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+    val aVersion = a.substringBefore('+')
+    val bVersion = b.substringBefore('+')
+    val aParts = aVersion.substringBefore('-').split('.')
+    val bParts = bVersion.substringBefore('-').split('.')
     repeat(maxOf(aParts.size, bParts.size)) { i ->
-        val diff = aParts.getOrElse(i) { 0 } - bParts.getOrElse(i) { 0 }
+        val diff = aParts.getOrElse(i) { "0" }.toBigInteger()
+            .compareTo(bParts.getOrElse(i) { "0" }.toBigInteger())
         if (diff != 0) return diff
     }
-    return 0
+    val aPre = aVersion.substringAfter('-', "")
+    val bPre = bVersion.substringAfter('-', "")
+    if (aPre == bPre) return 0
+    if (aPre.isEmpty()) return 1
+    if (bPre.isEmpty()) return -1
+    val aIdentifiers = aPre.split('.')
+    val bIdentifiers = bPre.split('.')
+    repeat(minOf(aIdentifiers.size, bIdentifiers.size)) { i ->
+        val left = aIdentifiers[i]
+        val right = bIdentifiers[i]
+        val leftNumber = left.takeIf { it.all(Char::isDigit) }?.toBigIntegerOrNull()
+        val rightNumber = right.takeIf { it.all(Char::isDigit) }?.toBigIntegerOrNull()
+        val diff = when {
+            leftNumber != null && rightNumber != null -> leftNumber.compareTo(rightNumber)
+            leftNumber != null -> -1
+            rightNumber != null -> 1
+            else -> left.compareTo(right)
+        }
+        if (diff != 0) return diff
+    }
+    return aIdentifiers.size.compareTo(bIdentifiers.size)
 }
-
-private val RESOLVED_SKIP_PIN =
-    Regex(""""identity"\s*:\s*"skip"[\s\S]*?"version"\s*:\s*"([^"]+)"""")
 
 /** Matches `…/skip.git", exact: "1.9.3"`, `…, from: "1.9.3"`, and `…, .upToNextMajor(from: "1.9.3")`. */
 private val MANIFEST_SKIP_REQUIREMENT = Regex(

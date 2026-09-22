@@ -79,11 +79,18 @@ abstract class SkipExportTask : DefaultTask() {
 
     /**
      * What to do when the `skip` CLI version drifts from the version the package declares
-     * (see [verifySkipCliVersion]): `"warn"` (default), `"fail"`, or `"off"`. Not an input —
-     * it changes diagnostics, never the exported AARs.
+     * (see [selectSkipExecutable]): `"install"` (default), `"warn"`, `"fail"`, or `"off"`.
      */
-    @get:Internal
+    @get:Input
     abstract val skipVersionCheck: Property<String>
+
+    @get:Internal
+    abstract val offline: Property<Boolean>
+
+    init {
+        skipVersionCheck.convention("install")
+        offline.convention(project.gradle.startParameter.isOffline)
+    }
 
     /**
      * `bin` directory of the Gradle installation running this build (the wrapper dist when
@@ -111,20 +118,63 @@ abstract class SkipExportTask : DefaultTask() {
     fun export() {
         val pkg = packageDir.get().asFile
         val out = outputDir.get().asFile
-        verifySkipCliVersion(pkg)
+        val expected = expectedSkipVersion(
+            File(pkg, "Package.swift").takeIf { it.isFile }?.readText(),
+            File(pkg, "Package.resolved").takeIf { it.isFile }?.readText(),
+        )
+        val installedExecutable = resolveSkipExecutable()
+        val executable = selectSkipExecutable(expected, installedExecutable)
+        val managedSkipBin = if (executable != installedExecutable) File(executable).parent else null
+        try {
+            exportWithSelfHealing(pkg, out, executable, managedSkipBin)
+        } catch (failure: SkipExportFailure) {
+            if (skipVersionCheck.get() != "install" || offline.get()) throw failure
+            val required = failure.requiredVersion ?: throw failure
+            val current = readSkipVersion(executable) ?: throw failure
+            if (compareDottedVersions(required.version, current) <= 0) throw failure
+            logger.warn(
+                "skip export resolved Skip ${required.version}, newer than CLI $current; " +
+                    "selecting that version before one final attempt.",
+            )
+            val upgraded = try {
+                SkipCliInstaller.selectOrInstall(
+                    required, current, false, { readSkipVersion(it.absolutePath) }, ::runBrew,
+                )
+            } catch (upgradeFailure: Exception) {
+                throw GradleException("${failure.message} Skip CLI recovery failed: ${upgradeFailure.message}", failure)
+            }
+            logger.lifecycle("skipSpm: retrying export once with ${upgraded.absolutePath}.")
+            // Exactly one export after upgrading: no additional fetch or stale-output retries.
+            exportOnce(pkg, out, upgraded.absolutePath, upgraded.parent, retryTransient = false)
+        }
+    }
+
+    private fun exportWithSelfHealing(pkg: File, out: File, executable: String, managedSkipBin: String?) {
         var selfCleaned = false
+        var requiredVersion: SkipVersionRequirement? = null
         while (true) {
             try {
-                exportOnce(pkg, out)
+                exportOnce(pkg, out, executable, managedSkipBin)
                 return
-            } catch (stale: StaleTranspilerOutputsException) {
+            } catch (failure: SkipExportFailure) {
+                // A clean retry can fail before resolving again; retain the newer requirement seen earlier.
+                val observed = failure.requiredVersion
+                if (observed != null && (requiredVersion == null ||
+                    compareDottedVersions(observed.version, requiredVersion.version) > 0)
+                ) {
+                    requiredVersion = observed
+                }
+                failure.requiredVersion = requiredVersion
+                if (failure !is StaleTranspilerOutputsException) throw failure
+                val stale = failure
                 val transpilerOutputs = File(pkg, TRANSPILER_OUTPUTS_PATH)
                 if (selfCleaned || !transpilerOutputs.isDirectory) {
-                    throw GradleException(
+                    throw SkipExportFailure(
                         "skip export failed on stale transpiler outputs and a clean re-export did not recover: " +
                             "${stale.message}. Run the `cleanSharedBuild` task (or `gradle clean`) to delete the " +
                             "package's entire .build/, then build again.",
                         stale,
+                        requiredVersion,
                     )
                 }
                 selfCleaned = true
@@ -143,13 +193,15 @@ abstract class SkipExportTask : DefaultTask() {
     }
 
     /** One full export attempt: run skip, normalize the AAR namespaces, reject husks. */
-    private fun exportOnce(pkg: File, out: File) {
+    private fun exportOnce(
+        pkg: File, out: File, executable: String, managedSkipBin: String?, retryTransient: Boolean = true,
+    ) {
         out.mkdirs()
         // Drop stale AARs so a removed module's leftover can't linger and get consumed.
         out.listFiles { f -> f.extension == "aar" }?.forEach { it.delete() }
 
         val command = mutableListOf(
-            resolveSkipExecutable(), "export",
+            executable, "export",
             "--module", module.get(),
             "--project", pkg.name,
             "--no-export-project",
@@ -170,7 +222,33 @@ abstract class SkipExportTask : DefaultTask() {
         val resolvedLock = File(pkg, "Package.resolved")
         val lockBackup = if (resolvedLock.isFile) resolvedLock.readBytes() else null
         try {
-            runExportWithRetry(pkg, command)
+            runExportWithRetry(pkg, command, managedSkipBin, retryTransient)
+
+            val prefix = namespacePrefix.get()
+            val mode = buildMode.get()
+            val aars = out.listFiles { f -> f.extension == "aar" }?.toList().orEmpty()
+            aars.forEach { aar ->
+                normalizeManifest(aar, manifestPackageFor(aar, mode, prefix))
+            }
+
+            // skip export can complete successfully while packaging "husk" AARs — a module whose
+            // classes.jar is an empty zip. The breakage then surfaces far away (hundreds of unresolved
+            // references when the consuming app compiles), so validate here. Metadata-only modules are
+            // legitimate, though: e.g. SkipSwiftUI ships a classes.jar holding Kotlin metadata and zero
+            // .class entries, so the check accepts Kotlin metadata as compiled output too.
+            val husks = aars.filterNot(::aarHasCompiledOutput)
+            if (husks.isNotEmpty()) {
+                throw StaleTranspilerOutputsException(
+                    "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
+                )
+            }
+        } catch (failure: SkipExportFailure) {
+            // Android resolution may add/update Skip. Read its requirement before restoring the lockfile.
+            failure.requiredVersion = expectedSkipVersion(
+                File(pkg, "Package.swift").takeIf { it.isFile }?.readText(),
+                resolvedLock.takeIf { it.isFile }?.readText(),
+            )
+            throw failure
         } finally {
             if (lockBackup != null && resolvedLock.isFile &&
                 !resolvedLock.readBytes().contentEquals(lockBackup)
@@ -178,62 +256,67 @@ abstract class SkipExportTask : DefaultTask() {
                 resolvedLock.writeBytes(lockBackup)
             }
         }
-
-        val prefix = namespacePrefix.get()
-        val mode = buildMode.get()
-        val aars = out.listFiles { f -> f.extension == "aar" }?.toList().orEmpty()
-        aars.forEach { aar ->
-            normalizeManifest(aar, manifestPackageFor(aar, mode, prefix))
-        }
-
-        // skip export can complete successfully while packaging "husk" AARs — a module whose
-        // classes.jar is an empty zip. The breakage then surfaces far away (hundreds of unresolved
-        // references when the consuming app compiles), so validate here. Metadata-only modules are
-        // legitimate, though: e.g. SkipSwiftUI ships a classes.jar holding Kotlin metadata and zero
-        // .class entries, so the check accepts Kotlin metadata as compiled output too.
-        val husks = aars.filterNot(::aarHasCompiledOutput)
-        if (husks.isNotEmpty()) {
-            throw StaleTranspilerOutputsException(
-                "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
-            )
-        }
     }
 
-    /**
-     * Preflights the `skip` CLI version against the version the package declares — the
-     * `Package.resolved` pin of the `skip` package when present, else the `Package.swift`
-     * requirement on `skip.git`. CLI and skipstone plugin ship from the same repo and version
-     * stream, so drift between them produces cryptic far-away failures (unresolved bridge symbols
-     * in generated Kotlin, transpiler errors against newer skip-fuse-ui). Per [skipVersionCheck]
-     * this warns (default), fails, or is off. Runs only when the export itself runs — an
-     * up-to-date export can't be hurt by drift. Never fails on check *infrastructure* (missing
-     * files, unparseable output): only a positively detected mismatch is reported.
-     */
-    private fun verifySkipCliVersion(pkg: File) {
-        val mode = skipVersionCheck.getOrElse("warn")
-        if (mode == "off") return
-        val expected = expectedSkipVersion(
-            File(pkg, "Package.swift").takeIf { it.isFile }?.readText(),
-            File(pkg, "Package.resolved").takeIf { it.isFile }?.readText(),
-        ) ?: return
-        val versionOutput = ByteArrayOutputStream()
-        val result = runCatching {
-            execOps.exec {
-                commandLine(resolveSkipExecutable(), "version")
-                isIgnoreExitValue = true
-                standardOutput = versionOutput
-                errorOutput = versionOutput
-            }
-        }.getOrNull() ?: return
-        if (result.exitValue != 0) return
-        val cliVersion = parseSkipCliVersion(versionOutput.toString()) ?: return
-        val mismatch = expected.mismatchWith(cliVersion) ?: return
+    /** Select before the first export; failure recovery may upgrade the CLI once afterwards. */
+    private fun selectSkipExecutable(expected: SkipVersionRequirement?, executable: String): String {
+        val mode = skipVersionCheck.get()
+        if (mode == "off" || expected == null) return executable
+        // Missing or unparseable CLIs retain the previous export behavior.
+        val current = readSkipVersion(executable) ?: return executable
+        val mismatch = expected.mismatchWith(current)
+        if (mode == "install" && mismatch != null) {
+            val requirement = if (expected.exact) expected.version else ">= ${expected.version}"
+            logger.lifecycle("skipSpm: selecting Skip CLI $requirement for this package (active: $current).")
+            return SkipCliInstaller.selectOrInstall(
+                expected, current, offline.get(), { readSkipVersion(it.absolutePath) }, ::runBrew,
+            ).absolutePath
+        }
+        if (mismatch == null) return executable
         if (mode == "fail") {
             throw GradleException(
                 "skipSpm: $mismatch (set skipSpm.skipVersionCheck = \"warn\" or \"off\" to demote this).",
             )
         }
         logger.warn("skipSpm: $mismatch")
+        return executable
+    }
+
+    private fun runBrew(arguments: List<String>): String {
+        val executable = System.getenv("SKIP_BREW_PATH")?.takeIf { it.isNotBlank() }
+            ?: listOf("/opt/homebrew/bin/brew", "/usr/local/bin/brew", "/home/linuxbrew/.linuxbrew/bin/brew")
+                .firstOrNull { File(it).canExecute() } ?: "brew"
+        val output = ByteArrayOutputStream()
+        val errors = ByteArrayOutputStream()
+        val result = try {
+            execOps.exec {
+                commandLine(listOf(executable) + arguments)
+                environment("HOMEBREW_NO_AUTO_UPDATE", "1")
+                environment("HOMEBREW_NO_INSTALL_CLEANUP", "1")
+                isIgnoreExitValue = true
+                standardOutput = output
+                errorOutput = errors
+            }
+        } catch (e: Exception) {
+            throw GradleException("skipSpm: Homebrew is required to select an installed version or upgrade the Skip CLI.", e)
+        }
+        if (result.exitValue != 0) {
+            throw GradleException("skipSpm: brew ${arguments.joinToString(" ")} failed: $output$errors")
+        }
+        return output.toString()
+    }
+
+    private fun readSkipVersion(executable: String): String? {
+        val output = ByteArrayOutputStream()
+        val result = runCatching {
+            execOps.exec {
+                commandLine(executable, "version")
+                isIgnoreExitValue = true
+                standardOutput = output
+                errorOutput = output
+            }
+        }.getOrNull() ?: return null
+        return if (result.exitValue == 0) parseSkipCliVersion(output.toString()) else null
     }
 
     /**
@@ -256,14 +339,16 @@ abstract class SkipExportTask : DefaultTask() {
      * Runs `skip export`, retrying when it fails with a *transient* SPM/git fetch error. On a cold
      * checkout (e.g. CI) skip resolves the whole package graph from remote repos, so a single
      * network hiccup ("Couldn't fetch updates from remote repositories") would otherwise fail the
-     * build. Compile/config failures are surfaced immediately — only network-shaped failures retry,
-     * so a real Swift error never burns three full export runs.
+     * build. Only network-shaped failures retry with the same CLI. If resolution reveals a newer Skip
+     * requirement on failure, [export] may upgrade the CLI and run one final export.
      *
      * A failure whose output matches a stale-transpiler-outputs signature is thrown as
      * [StaleTranspilerOutputsException] instead (retrying it against the same `.build/` state can
      * never succeed); [export] self-heals it by cleaning the outputs and re-exporting.
      */
-    private fun runExportWithRetry(pkg: File, command: List<String>) {
+    private fun runExportWithRetry(
+        pkg: File, command: List<String>, managedSkipBin: String?, retryTransient: Boolean,
+    ) {
         var attempt = 1
         while (true) {
             // Tee the process output to the build console AND a buffer so we can classify a failure.
@@ -283,7 +368,7 @@ abstract class SkipExportTask : DefaultTask() {
                 val inheritedPath = System.getenv("PATH").orEmpty()
                 environment(
                     "PATH",
-                    (listOfNotNull(gradleInstallBinDir.orNull) +
+                    (listOfNotNull(gradleInstallBinDir.orNull, managedSkipBin) +
                         listOf("/opt/homebrew/bin", "/usr/local/bin", inheritedPath))
                         .filter { it.isNotEmpty() }
                         .joinToString(":"),
@@ -310,7 +395,7 @@ abstract class SkipExportTask : DefaultTask() {
                 )
             }
             val looksTransient = TRANSIENT_FETCH_HINTS.any { combined.contains(it, ignoreCase = true) }
-            if (looksTransient && attempt < MAX_EXPORT_ATTEMPTS) {
+            if (retryTransient && looksTransient && attempt < MAX_EXPORT_ATTEMPTS) {
                 val backoffSeconds = attempt * RETRY_BACKOFF_SECONDS
                 logger.warn(
                     "skip export failed on a likely-transient fetch error " +
@@ -320,7 +405,7 @@ abstract class SkipExportTask : DefaultTask() {
                 attempt++
                 continue
             }
-            throw GradleException(
+            throw SkipExportFailure(
                 "skip export failed (exit ${result.exitValue}) after $attempt attempt(s)." +
                     if (looksTransient) " Last failure looked like a network/fetch error." else "",
             )
@@ -390,8 +475,15 @@ abstract class SkipExportTask : DefaultTask() {
     }
 }
 
+/** Keeps the requirement observed during export after its lockfile has been restored. */
+internal open class SkipExportFailure(
+    message: String,
+    cause: Throwable? = null,
+    var requiredVersion: SkipVersionRequirement? = null,
+) : GradleException(message, cause)
+
 /** An export failure caused by stale incremental transpiler state, recoverable by a clean re-export. */
-internal class StaleTranspilerOutputsException(message: String) : GradleException(message)
+internal class StaleTranspilerOutputsException(message: String) : SkipExportFailure(message)
 
 /** The skipstone transpiler's output tree, relative to the package dir. */
 internal const val TRANSPILER_OUTPUTS_PATH = ".build/plugins/outputs"
