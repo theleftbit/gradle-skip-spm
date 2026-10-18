@@ -174,6 +174,40 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
+    fun `passes debugInfo to skip export`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val argsDump = File(projectDir, "skip-args")
+        val fakeSkip = writeFakeSkip(
+            """
+            echo "${'$'}@" > "${argsDump.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """,
+        )
+
+        val result = runner(fakeSkip, extraTaskConfig = """debugInfo.set("line-tables")""").build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertContains(argsDump.readText(), "--debug-info line-tables")
+    }
+
+    @Test
+    fun `omits --debug-info when debugInfo is unset`() {
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
+        val argsDump = File(projectDir, "skip-args")
+        val fakeSkip = writeFakeSkip(
+            """
+            echo "${'$'}@" > "${argsDump.absolutePath}"
+            cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/
+            """,
+        )
+
+        val result = runner(fakeSkip).build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        assertFalse(argsDump.readText().contains("--debug-info"))
+    }
+
+    @Test
     fun `childGradleBuildCache=true leaves the children's build cache alone`() {
         writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"))
         val envDump = File(projectDir, "skip-env")

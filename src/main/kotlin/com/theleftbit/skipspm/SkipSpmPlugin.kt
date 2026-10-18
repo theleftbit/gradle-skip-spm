@@ -90,6 +90,7 @@ class SkipSpmPlugin : Plugin<Project> {
                 skipVersionCheck.set(ext.skipVersionCheck)
                 gradleInstallBin?.let { gradleInstallBinDir.set(it) }
                 childGradleBuildCache.set(ext.childGradleBuildCache)
+                if (mode == "debug") debugInfo.set(ext.debugInfo)
             }
         }
 
@@ -120,6 +121,9 @@ class SkipSpmPlugin : Plugin<Project> {
         project.afterEvaluate {
             require(ext.skipVersionCheck.get() in listOf("install", "warn", "fail", "off")) {
                 "skipSpm: skipVersionCheck must be \"install\", \"warn\", \"fail\", or \"off\", was '${ext.skipVersionCheck.get()}'."
+            }
+            require(!ext.debugInfo.isPresent || ext.debugInfo.get() in listOf("full", "line-tables")) {
+                "skipSpm: debugInfo must be \"full\" or \"line-tables\", was '${ext.debugInfo.get()}'."
             }
             @Suppress("DEPRECATION")
             if (ext.pruneStaleTransforms.isPresent) {

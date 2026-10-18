@@ -112,6 +112,15 @@ abstract class SkipSpmExtension {
     abstract val childGradleBuildCache: Property<Boolean>
 
     /**
+     * Debug info of the debug-mode native libraries, passed to `skip export --debug-info`:
+     * `"full"` or `"line-tables"`. Unset keeps the CLI default (`full`). `line-tables` drops the
+     * `.swift_ast` section and type DWARF but keeps `.debug_line`, so breakpoints, stepping and
+     * backtraces still have files and lines; Android Studio's LLDB has no Swift support either way.
+     * Release-mode exports are never affected. Needs Skip 1.9.16 or later.
+     */
+    abstract val debugInfo: Property<String>
+
+    /**
      * Deprecated no-op. The plugin no longer prunes Gradle's artifact-transform cache: entries are
      * only distinguishable by AAR *name*, and every checkout/worktree of the same app produces the
      * same names — so a prune from one checkout could delete entries another checkout's live daemon

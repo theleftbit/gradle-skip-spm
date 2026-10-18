@@ -9,6 +9,7 @@ import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputDirectory
 import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
@@ -86,6 +87,11 @@ abstract class SkipExportTask : DefaultTask() {
 
     @get:Internal
     abstract val offline: Property<Boolean>
+
+    /** `skip export --debug-info` level (see [SkipSpmExtension.debugInfo]); omitted when unset. */
+    @get:Input
+    @get:Optional
+    abstract val debugInfo: Property<String>
 
     init {
         skipVersionCheck.convention("install")
@@ -212,6 +218,7 @@ abstract class SkipExportTask : DefaultTask() {
             command.add("--arch")
             command.add(abi)
         }
+        debugInfo.orNull?.let { command += listOf("--debug-info", it) }
 
         // skip export resolves the *Android* dependency graph (SKIP_ENABLED=1), which adds the
         // Skip/Android bridge pins on top of the iOS resolution committed to Package.resolved —

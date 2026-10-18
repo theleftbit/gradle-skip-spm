@@ -169,6 +169,25 @@ skipSpm {
 }
 ```
 
+## Debug info of debug builds
+
+`skip export` builds the debug native libraries with full debug info by default, including a
+`.swift_ast` section that only a Swift-aware LLDB can use. Android Studio's bundled LLDB has no
+Swift support, so most projects pay for it on every build without using it. Since Skip 1.9.16,
+`line-tables` keeps file and line information for breakpoints, stepping and backtraces, and drops
+the rest:
+
+```kotlin
+skipSpm {
+    debugInfo = "line-tables"   // or "full"; unset keeps the skip default (full)
+}
+```
+
+It applies to debug-mode exports only. Release-mode exports keep full debug info, so crash
+reporters still symbolicate release builds as before. On a production Skip Fuse app the largest debug library
+went from 490 MB to 285 MB (AAR 168 MB to 108 MB), and the native build-and-package step after a
+public API change in a low-level module went from 119 s to 108 s.
+
 ## Native libraries & app size (stripping)
 
 `skip export` compiles the shared Swift to **native `.so`** — the umbrella module plus the Swift
