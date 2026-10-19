@@ -15,7 +15,7 @@ so the default `gradlePluginPortal()` in your `settings.gradle.kts` resolves it 
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("com.theleftbit.skipspm") version "0.7.0"
+    id("com.theleftbit.skipspm") version "0.7.1"
 }
 
 skipSpm {

@@ -15,7 +15,7 @@ kotlin {
 }
 
 group = "com.theleftbit"
-version = "0.7.0"
+version = "0.7.1"
 
 dependencies {
     // Applied on the consuming root project to register the afterSync trigger that keeps the
