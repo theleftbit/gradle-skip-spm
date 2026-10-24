@@ -91,6 +91,7 @@ class SkipSpmPlugin : Plugin<Project> {
                 gradleInstallBin?.let { gradleInstallBinDir.set(it) }
                 childGradleBuildCache.set(ext.childGradleBuildCache)
                 if (mode == "debug") debugInfo.set(ext.debugInfo)
+                if (mode == "release") icuLanguages.set(ext.icuLanguages.orElse(emptyList()))
             }
         }
 
@@ -124,6 +125,11 @@ class SkipSpmPlugin : Plugin<Project> {
             }
             require(!ext.debugInfo.isPresent || ext.debugInfo.get() in listOf("full", "line-tables")) {
                 "skipSpm: debugInfo must be \"full\" or \"line-tables\", was '${ext.debugInfo.get()}'."
+            }
+            ext.icuLanguages.getOrElse(emptyList()).forEach {
+                require(Regex("[a-z]{2,3}").matches(it)) {
+                    "skipSpm: icuLanguages entries must be ISO 639 language codes like \"en\", was '$it'."
+                }
             }
             @Suppress("DEPRECATION")
             if (ext.pruneStaleTransforms.isPresent) {

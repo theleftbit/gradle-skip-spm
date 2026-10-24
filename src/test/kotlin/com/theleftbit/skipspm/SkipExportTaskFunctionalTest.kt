@@ -8,9 +8,11 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContains
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -205,6 +207,69 @@ class SkipExportTaskFunctionalTest {
 
         assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
         assertFalse(argsDump.readText().contains("--debug-info"))
+    }
+
+    @Test
+    fun `icuLanguages relinks lib_FoundationICU with the same exports and far less data`() {
+        // Needs a real Swift Android SDK (its static archive and NDK toolchain); skipped without one.
+        val home = System.getProperty("user.home")
+        val bundle = listOf("$home/Library/org.swift.swiftpm/swift-sdks", "$home/.swiftpm/swift-sdks")
+            .flatMap { File(it).listFiles { f -> f.name.endsWith("-RELEASE_android.artifactbundle") }.orEmpty().toList() }
+            .firstOrNull()
+        assumeTrue(bundle != null, "no Swift Android SDK installed")
+        File(projectDir, ".swift-version").writeText(bundle!!.name.removePrefix("swift-").substringBefore("-RELEASE"))
+        val sdk = File(bundle, "swift-android")
+        val original = File(sdk, "swift-resources/usr/lib/swift-aarch64/android/lib_FoundationICU.so")
+        writeAar(fixturesDir, "TestModule-release.aar", listOf("com/test/Foo.class"), mapOf("jni/arm64-v8a/lib_FoundationICU.so" to original))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+
+        val result = runner(fakeSkip, extraTaskConfig = """buildMode.set("release"); icuLanguages.set(listOf("en", "es"))""").build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportTest")?.outcome)
+        val trimmed = File(projectDir, "trimmed.so")
+        ZipFile(File(projectDir, "lib/debug/TestModule-release.aar")).use { zip ->
+            zip.getInputStream(zip.getEntry("jni/arm64-v8a/lib_FoundationICU.so")).use { trimmed.writeBytes(it.readBytes()) }
+        }
+        assertTrue(trimmed.length() < original.length() / 2, "trimmed ${trimmed.length()} vs original ${original.length()}")
+        val nm = sdk.listFiles { f -> f.name.startsWith("android-ndk-") }!!.single()
+            .resolve("toolchains/llvm/prebuilt").listFiles()!!.single().resolve("bin/llvm-nm")
+        fun exports(lib: File) = ProcessBuilder(nm.path, "-D", "--defined-only", lib.path).start()
+            .inputStream.bufferedReader().readLines().map { it.substringAfter(' ') }.sorted()
+        assertEquals(exports(original), exports(trimmed))
+    }
+
+    @Test
+    fun `plugin never trims ICU data in debug exports`() {
+        val icu = File(projectDir, "fake-icu.so").apply { writeText("not an ELF; trimming it would fail") }
+        writeAar(fixturesDir, "TestModule-debug.aar", listOf("com/test/Foo.class"), mapOf("jni/arm64-v8a/lib_FoundationICU.so" to icu))
+        val fakeSkip = writeFakeSkip("""cp "${fixturesDir.absolutePath}"/*.aar "${'$'}out"/""")
+        File(pkgDir, "Sources").mkdirs()
+        File(pkgDir, "Package.swift").writeText("// swift-tools-version:5.9")
+        File(projectDir, "settings.gradle.kts").writeText("rootProject.name = \"export-test\"")
+        File(projectDir, "build.gradle.kts").writeText(
+            """
+            plugins { id("com.theleftbit.skipspm") }
+            skipSpm {
+                packageDir = layout.projectDirectory.dir("pkg")
+                module = "TestModule"
+                abis = listOf("aarch64")
+                skipVersionCheck = "off"
+                icuLanguages = listOf("en")
+            }
+            """.trimIndent(),
+        )
+
+        val result = GradleRunner.create()
+            .withProjectDir(projectDir)
+            .withPluginClasspath()
+            .withArguments("exportSharedAarsDebug")
+            .withEnvironment(System.getenv() + mapOf("SKIP_PATH" to fakeSkip.absolutePath))
+            .build()
+
+        assertEquals(TaskOutcome.SUCCESS, result.task(":exportSharedAarsDebug")?.outcome)
+        ZipFile(File(projectDir, "lib/debug/TestModule-debug.aar")).use { zip ->
+            assertContentEquals(icu.readBytes(), zip.getInputStream(zip.getEntry("jni/arm64-v8a/lib_FoundationICU.so")).readBytes())
+        }
     }
 
     @Test
@@ -783,8 +848,8 @@ class SkipExportTaskFunctionalTest {
             zip.getInputStream(zip.getEntry("AndroidManifest.xml")).readBytes().decodeToString()
         }
 
-    /** Writes `<name>` into [dir]: an AAR whose classes.jar holds [classEntries]. */
-    private fun writeAar(dir: File, name: String, classEntries: List<String>) {
+    /** Writes `<name>` into [dir]: an AAR whose classes.jar holds [classEntries], plus [extraEntries]' files. */
+    private fun writeAar(dir: File, name: String, classEntries: List<String>, extraEntries: Map<String, File> = emptyMap()) {
         dir.mkdirs()
         val aar = File(dir, name)
         ZipOutputStream(aar.outputStream()).use { zip ->
@@ -809,6 +874,11 @@ class SkipExportTaskFunctionalTest {
             zip.putNextEntry(ZipEntry("classes.jar"))
             zip.write(jarBytes)
             zip.closeEntry()
+            extraEntries.forEach { (entry, file) ->
+                zip.putNextEntry(ZipEntry(entry))
+                file.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+            }
         }
     }
 }
