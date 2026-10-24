@@ -121,6 +121,16 @@ abstract class SkipSpmExtension {
     abstract val debugInfo: Property<String>
 
     /**
+     * Languages whose ICU data the release-mode `lib_FoundationICU.so` keeps (e.g.
+     * `listOf("en", "es")`); unset keeps the Swift Android SDK's full ICU data. When set, the
+     * release export relinks that library from the SDK's static archive without other languages'
+     * display names, collation, spell-out rules and units, break dictionaries, transliterators and
+     * legacy charset converters: 40 → 13 MB per ABI. Every locale's main data stays, so dates keep
+     * following the device locale. Debug-mode exports are never affected. See README.
+     */
+    abstract val icuLanguages: ListProperty<String>
+
+    /**
      * Deprecated no-op. The plugin no longer prunes Gradle's artifact-transform cache: entries are
      * only distinguishable by AAR *name*, and every checkout/worktree of the same app produces the
      * same names — so a prune from one checkout could delete entries another checkout's live daemon

@@ -266,6 +266,39 @@ android {
 }
 ```
 
+## Trimming ICU data (`icuLanguages`)
+
+The Swift Android SDK's `lib_FoundationICU.so` embeds ICU data for every locale and feature: 34 MB
+of it per ABI. If the app only needs a few languages, list them and the release export relinks that
+library with a trimmed copy of the data:
+
+```kotlin
+skipSpm {
+    icuLanguages = listOf("en", "es")   // ISO 639 codes; unset keeps the full ICU data
+}
+```
+
+On a production app it took the stripped arm64 library from 40 MB to 13.4 MB, and its share of the
+user's download from 15.6 MB to 4.7 MB per ABI.
+
+What's dropped and what stays:
+- **Dropped everywhere**: break dictionaries (`*.dict`, Thai/CJK word breaking), legacy charset
+  converters (`*.cnv`, `cnvalias.icu`), character names (`unames.icu`) and all transliterators.
+- **Per-language trees** (`coll`, `rbnf`, `lang`, `region`, `unit`, `zone`, `curr`: collation,
+  spell-out/ordinal rules, display names of languages, regions, units, time zones and currencies):
+  only `root` and the listed languages (with their regional variants, e.g. `es_MX`) stay.
+- **Kept**: everything else, including every locale's main data, so dates, numbers and calendars
+  still follow the device locale.
+
+Don't trim `rbnf` for a language the app formats: corelibs `NumberFormatter` crashes (`SIGTRAP`) on
+`.ordinal` without it, which is why the listed languages keep theirs.
+
+Only release-mode exports are trimmed, debug ones never. The plugin rewrites
+`jni/<abi>/lib_FoundationICU.so` inside the exported AARs, right after `skip export`, so the app
+needs no packaging changes. Relinking uses the Swift Android SDK named by the nearest
+`.swift-version` at or above the package (or the only one installed) and its bundled NDK toolchain,
+and targets the AAR's `minSdkVersion`. Changing `icuLanguages` re-runs the release export.
+
 ## Disk usage: Gradle's transforms cache
 
 AGP consumes an AAR by **exploding** it — classes.jar plus every native `.so` — into a

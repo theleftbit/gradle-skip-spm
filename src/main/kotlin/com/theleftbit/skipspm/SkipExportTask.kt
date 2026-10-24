@@ -93,7 +93,12 @@ abstract class SkipExportTask : DefaultTask() {
     @get:Optional
     abstract val debugInfo: Property<String>
 
+    /** Languages whose ICU data `lib_FoundationICU.so` keeps (see [SkipSpmExtension.icuLanguages]); empty keeps all. */
+    @get:Input
+    abstract val icuLanguages: ListProperty<String>
+
     init {
+        icuLanguages.convention(emptyList())
         skipVersionCheck.convention("install")
         offline.convention(project.gradle.startParameter.isOffline)
     }
@@ -248,6 +253,12 @@ abstract class SkipExportTask : DefaultTask() {
                 throw StaleTranspilerOutputsException(
                     "skip export produced husk AARs (no compiled classes): " + husks.joinToString { it.name },
                 )
+            }
+
+            val languages = icuLanguages.get()
+            if (languages.isNotEmpty()) {
+                val trimmer = FoundationIcuTrimmer(execOps, pkg, languages, File(temporaryDir, "icu"))
+                aars.forEach(trimmer::trim)
             }
         } catch (failure: SkipExportFailure) {
             // Android resolution may add/update Skip. Read its requirement before restoring the lockfile.
