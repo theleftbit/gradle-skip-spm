@@ -15,7 +15,7 @@ so the default `gradlePluginPortal()` in your `settings.gradle.kts` resolves it 
 // app/build.gradle.kts
 plugins {
     id("com.android.application")
-    id("com.theleftbit.skipspm") version "0.8.0"
+    id("com.theleftbit.skipspm") version "0.8.1"
 }
 
 skipSpm {
@@ -128,8 +128,14 @@ relinking the global command.
 
 If no installed CLI qualifies, Homebrew is refreshed and its latest stable Skip formula is
 installed/upgraded only if it meets the requirement and is newer than all installed CLIs.
-Historical releases and prereleases are never downloaded automatically. An unavailable exact
-version fails, even if another newer release exists. `SKIP_BREW_PATH` can override Homebrew's path.
+When Homebrew cannot supply an exact pin, the plugin downloads that version's official
+`skiptools/skip` release into `GRADLE_USER_HOME/caches/skip-spm/cli/<platform>/<version>`.
+The archive's SHA-256 is checked against the release metadata, and the executable must report
+the requested version before the cache entry is published. Installations are locked across
+processes and published atomically. This also works when the active CLI is newer than the pin,
+without downgrading Homebrew or changing its global link. A cached release can be reused offline
+without Homebrew. Automatic release downloads are limited to stable versions; installed
+prereleases can still be reused. `SKIP_BREW_PATH` can override Homebrew's path.
 Upgrading can change the global link. The plugin sets `HOMEBREW_NO_INSTALL_CLEANUP=1` to keep
 old installations; other Homebrew commands may still clean them. To retain them outside the
 plugin, set `HOMEBREW_NO_CLEANUP_FORMULAE=skip` (see the [Homebrew FAQ](https://docs.brew.sh/FAQ#how-do-i-keep-old-versions-of-a-formula-when-upgrading)).
