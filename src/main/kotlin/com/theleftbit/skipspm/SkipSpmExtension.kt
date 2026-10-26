@@ -95,7 +95,8 @@ abstract class SkipSpmExtension {
 
     /**
      * CLI version policy: `"install"` (default) reuses installed CLIs or installs a newer stable
-     * Homebrew release. `Package.resolved` takes priority over the manifest fallback.
+     * Homebrew release, with an isolated official-release fallback for exact pins.
+     * `Package.resolved` takes priority over the manifest fallback.
      * A compatible active CLI is kept; an export revealing a newer requirement can retry once.
      * `"warn"` logs drift, `"fail"` rejects it, and `"off"` disables the check. Offline builds
      * never install or retry with another CLI after failure. See README for selection details.

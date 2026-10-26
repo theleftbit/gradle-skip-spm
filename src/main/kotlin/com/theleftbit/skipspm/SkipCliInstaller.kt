@@ -4,7 +4,7 @@ import groovy.json.JsonSlurper
 import org.gradle.api.GradleException
 import java.io.File
 
-/** Reuses installed Homebrew CLIs; new installations may only move forwards. */
+/** Reuses installed CLIs; exact releases may be installed without downgrading Homebrew. */
 internal object SkipCliInstaller {
     /** Called only when the active CLI does not meet [expected]. */
     fun selectOrInstall(
@@ -13,9 +13,16 @@ internal object SkipCliInstaller {
         offline: Boolean,
         readVersion: (File) -> String?,
         brew: (List<String>) -> String,
+        release: ((String, Boolean) -> File?)? = null,
     ): File {
-        val cellar = File(brew(listOf("--cellar")).trim(), "skip")
-        val caskroom = File(brew(listOf("--prefix")).trim(), "Caskroom/skip")
+        if (expected.exact) release?.invoke(expected.version, true)?.let { return it }
+        val (cellar, caskroom) = try {
+            File(brew(listOf("--cellar")).trim(), "skip") to
+                File(brew(listOf("--prefix")).trim(), "Caskroom/skip")
+        } catch (failure: Exception) {
+            if (expected.exact && !offline) release?.invoke(expected.version, false)?.let { return it }
+            throw failure
+        }
         fun installed(): List<Pair<File, String>> =
             (cellar.listFiles().orEmpty().map { File(it, "bin/skip") } +
                 caskroom.listFiles().orEmpty().map { File(it, "skip.artifactbundle/bin/skip") })
@@ -31,6 +38,7 @@ internal object SkipCliInstaller {
         val newestInstalled = (candidates.map { it.second } + currentVersion)
             .maxWith(::compareDottedVersions)
         if (expected.exact && compareDottedVersions(expected.version, newestInstalled) <= 0) {
+            if (!offline) release?.invoke(expected.version, false)?.let { return it }
             throw GradleException(
                 "skipSpm: Skip CLI ${expected.version} is not installed. Older versions may only be reused " +
                     "when already installed; automatic installation never downgrades from $newestInstalled.",
@@ -50,6 +58,7 @@ internal object SkipCliInstaller {
             throw GradleException("skipSpm: Homebrew did not report a stable Skip CLI release.")
         }
         if (compareDottedVersions(latest, newestInstalled) <= 0 || expected.mismatchWith(latest) != null) {
+            if (expected.exact) release?.invoke(expected.version, false)?.let { return it }
             throw GradleException(
                 "skipSpm: Homebrew's latest Skip CLI $latest cannot satisfy ${expected.version} " +
                     "with a forward-only installation (newest installed: $newestInstalled). " +

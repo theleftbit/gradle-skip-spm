@@ -193,4 +193,47 @@ class SkipCliInstallerTest {
         assertEquals(listOf("install", "--formula", "skip"), commands.last())
     }
 
+    @Test
+    fun `exact release fallback handles runners older and newer than the pin`() {
+        for (current in listOf("1.9.16", "1.9.20")) {
+            commands.clear()
+            latest = "1.9.20"
+            val requested = mutableListOf<Pair<String, Boolean>>()
+            val cached = cli("1.9.19").apply { delete() }
+            val selected = SkipCliInstaller.selectOrInstall(
+                SkipVersionRequirement("1.9.19", true), current, false,
+                { it.readText() }, ::brew,
+                { version, offline ->
+                    requested += version to offline
+                    if (offline) null else cached.apply { writeText(version); setExecutable(true) }
+                },
+            )
+            assertEquals("1.9.19", selected.readText())
+            assertEquals(listOf("1.9.19" to true, "1.9.19" to false), requested)
+            assertFalse(commands.any { it.first() in listOf("install", "upgrade") })
+            cached.delete()
+        }
+    }
+
+    @Test
+    fun `cached exact release works offline without Homebrew`() {
+        val cached = cli("1.9.19")
+        val selected = SkipCliInstaller.selectOrInstall(
+            SkipVersionRequirement("1.9.19", true), "1.9.20", true,
+            { it.readText() }, { error("Homebrew must not run") },
+            { _, offline -> assertTrue(offline); cached },
+        )
+        assertEquals(cached, selected)
+    }
+
+    @Test
+    fun `missing Homebrew can use an exact official release`() {
+        val cached = cli("1.9.19")
+        assertEquals(cached, SkipCliInstaller.selectOrInstall(
+            SkipVersionRequirement("1.9.19", true), "1.9.16", false,
+            { it.readText() }, { throw GradleException("brew not found") },
+            { _, offline -> if (offline) null else cached },
+        ))
+    }
+
 }

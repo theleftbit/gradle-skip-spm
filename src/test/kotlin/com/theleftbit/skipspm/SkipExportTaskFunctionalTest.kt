@@ -32,6 +32,7 @@ class SkipExportTaskFunctionalTest {
     private val invocationMarker = File(projectDir, "skip-invoked-once")
     private val lockfile = File(pkgDir, "Package.resolved")
     private val brewCalls = File(projectDir, "brew-calls")
+    private val releasePlatform = if (System.getProperty("os.name").startsWith("Mac")) "macos" else "linux"
     private val minimumManifest = """.package(url: "https://github.com/skiptools/skip.git", from: "1.9.0"),"""
 
     /** Verbatim shape of the SwiftPM failure seen after the transpiler outputs went stale. */
@@ -373,11 +374,11 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
-    fun `missing older exact CLI fails without updating Homebrew or exporting`() {
+    fun `missing older exact CLI fails offline without updating Homebrew or exporting`() {
         val active = writeFakeSkip("touch \"${invocationMarker.absolutePath}\"; exit 81")
         val result = runner(active,
             packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.2"),""",
-        ).buildAndFail()
+        ).withArguments("exportTest", "--offline").buildAndFail()
         assertContains(result.output, "Older versions may only be reused when already installed")
         assertEquals(listOf("--cellar", "--prefix"), brewCalls.readLines())
         assertFalse(invocationMarker.exists())
@@ -621,8 +622,12 @@ class SkipExportTaskFunctionalTest {
     }
 
     @Test
-    fun `manifest fallback does not retry when Homebrew has no newer release`() {
-        val active = writeSkipRequiringUpgrade()
+    fun `unavailable prerelease preserves original export and recovery errors`() {
+        val active = writeFakeSkip("""
+            echo old >> "${invocationMarker.absolutePath}"
+            echo '${skipPin("9.9.9-beta.1")}' > "${lockfile.absolutePath}"
+            exit 1
+        """)
         val result = runner(active,
             packageSwift = minimumManifest,
             extraEnv = mapOf("TEST_SKIP_LATEST" to "1.9.3"),
@@ -766,6 +771,7 @@ class SkipExportTaskFunctionalTest {
                 abis.set(listOf("arm64-v8a"))
                 namespacePrefix.set("com.test.shared")
                 outputDir.set(layout.projectDirectory.dir("lib/debug"))
+                cliCacheDir.set(layout.projectDirectory.dir("cli-cache"))
                 $extraTaskConfig
             }
             """.trimIndent(),
@@ -775,6 +781,22 @@ class SkipExportTaskFunctionalTest {
             .withPluginClasspath()
             .withArguments("exportTest")
             .withEnvironment(System.getenv() + mapOf("SKIP_PATH" to fakeSkip.absolutePath, "SKIP_BREW_PATH" to writeFakeBrew().absolutePath) + extraEnv)
+    }
+
+    @Test
+    fun `cached exact release is selected before the first export on a newer runner`() {
+        val active = writeFakeSkip("exit 81", version = "1.9.20")
+        val cached = writeSuccessfulSkip("1.9.19", "cli-cache/$releasePlatform/1.9.19/skip.artifactbundle/bin/skip",
+            """echo selected >> "${invocationMarker.absolutePath}"""")
+        val build = runner(active,
+            packageSwift = """.package(url: "https://github.com/skiptools/skip.git", exact: "1.9.19"),""",
+            extraTaskConfig = """cliCacheDir.set(layout.projectDirectory.dir("cli-cache"))""",
+        ).withArguments("exportTest", "--offline", "--configuration-cache")
+        lockfile.writeText(skipPin("1.9.19"))
+        assertEquals(TaskOutcome.SUCCESS, build.build().task(":exportTest")?.outcome)
+        assertEquals(listOf("selected"), invocationMarker.readLines())
+        assertFalse(brewCalls.exists())
+        assertTrue(cached.canExecute())
     }
 
     private fun skipPin(version: String) =

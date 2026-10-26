@@ -88,6 +88,9 @@ abstract class SkipExportTask : DefaultTask() {
     @get:Internal
     abstract val offline: Property<Boolean>
 
+    @get:Internal
+    abstract val cliCacheDir: DirectoryProperty
+
     /** `skip export --debug-info` level (see [SkipSpmExtension.debugInfo]); omitted when unset. */
     @get:Input
     @get:Optional
@@ -101,6 +104,7 @@ abstract class SkipExportTask : DefaultTask() {
         icuLanguages.convention(emptyList())
         skipVersionCheck.convention("install")
         offline.convention(project.gradle.startParameter.isOffline)
+        cliCacheDir.fileValue(File(project.gradle.gradleUserHomeDir, "caches/skip-spm/cli"))
     }
 
     /**
@@ -149,7 +153,7 @@ abstract class SkipExportTask : DefaultTask() {
             )
             val upgraded = try {
                 SkipCliInstaller.selectOrInstall(
-                    required, current, false, { readSkipVersion(it.absolutePath) }, ::runBrew,
+                    required, current, false, { readSkipVersion(it.absolutePath) }, ::runBrew, ::selectRelease,
                 )
             } catch (upgradeFailure: Exception) {
                 throw GradleException("${failure.message} Skip CLI recovery failed: ${upgradeFailure.message}", failure)
@@ -287,7 +291,7 @@ abstract class SkipExportTask : DefaultTask() {
             val requirement = if (expected.exact) expected.version else ">= ${expected.version}"
             logger.lifecycle("skipSpm: selecting Skip CLI $requirement for this package (active: $current).")
             return SkipCliInstaller.selectOrInstall(
-                expected, current, offline.get(), { readSkipVersion(it.absolutePath) }, ::runBrew,
+                expected, current, offline.get(), { readSkipVersion(it.absolutePath) }, ::runBrew, ::selectRelease,
             ).absolutePath
         }
         if (mismatch == null) return executable
@@ -299,6 +303,9 @@ abstract class SkipExportTask : DefaultTask() {
         logger.warn("skipSpm: $mismatch")
         return executable
     }
+
+    private fun selectRelease(version: String, offline: Boolean): File? =
+        SkipReleaseInstaller(cliCacheDir.get().asFile, { readSkipVersion(it.absolutePath) }).select(version, offline)
 
     private fun runBrew(arguments: List<String>): String {
         val executable = System.getenv("SKIP_BREW_PATH")?.takeIf { it.isNotBlank() }
